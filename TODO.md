@@ -31,9 +31,16 @@ Deferred items, not yet scheduled. Pick from here when ready.
       damage stages).
 
 ## Menus / UI chrome
-- [ ] **App menu bar** (currently menu-less): standard Strataris menu with
-      About, Quit, and a "Check for Updates…" item (pairs with Sparkle).
-- [ ] **About modal** — title, version/build, Jorvik credit, maybe the logo.
+- [x] **App menu bar** — done. `AppDelegate.installMainMenu()` builds a native
+      menu in code (no nib): app menu (About / Hide / Quit) + Window menu
+      (Minimize / Zoom / Enter Full Screen ⌃⌘F). Jorvik order: About first.
+      A "Check for Updates…" item slots into the app menu when Sparkle lands.
+- [x] **About modal** — done. Standard macOS About panel
+      (`orderFrontStandardAboutPanel`) showing the app icon, version, a
+      "Galactic Colony Defence" tagline, the zero-asset hook, and the Jorvik
+      credit. Native/dependency-free (no SwiftUI) to keep the footprint tiny.
+- [ ] **Settings… menu item** — add to the app menu once the options screen
+      below exists (key equivalent ⌘,).
 - [ ] **Game options screen** — toggles/sliders for Music volume, SFX volume,
       Voice on/off, (and likely invert-pitch/deadzone moved here from the
       controller sheet, plus difficulty later). Persist to UserDefaults.
