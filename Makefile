@@ -51,5 +51,8 @@ SWIFT_SOURCES    := main.swift \
 
 PACKAGE_TYPE     := zip
 EMBEDDED_FRAMEWORKS := Sparkle
+# Hardened runtime must allow loading the embedded Sparkle framework + its
+# helper apps (same convention as SpaceMan / HawkEye / CopyLens).
+ENTITLEMENTS     := Strataris.entitlements
 
 include ../jorvik-release/release.mk
