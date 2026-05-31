@@ -775,6 +775,21 @@ final class Renderer: NSObject, MTKViewDelegate {
         }
         enc.setRenderPipelineState(pipeline)
         enc.setFragmentTexture(texture, index: 0)
+        // Letterbox: keep the framebuffer's native aspect inside whatever the
+        // drawable is (maximised windows are rarely exactly 16:9). The pass
+        // clears to black first, so the unused margins read as clean bars.
+        let dw = Double(drawable.texture.width)
+        let dh = Double(drawable.texture.height)
+        if dw > 0, dh > 0 {
+            let target = Double(RenderConfig.width) / Double(RenderConfig.height)
+            var vw = dw, vh = dh, vx = 0.0, vy = 0.0
+            if dw / dh > target {            // too wide → pillarbox (bars left/right)
+                vw = dh * target; vx = (dw - vw) / 2
+            } else {                          // too tall → letterbox (bars top/bottom)
+                vh = dw / target; vy = (dh - vh) / 2
+            }
+            enc.setViewport(MTLViewport(originX: vx, originY: vy, width: vw, height: vh, znear: 0, zfar: 1))
+        }
         enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
         enc.endEncoding()
         cmd.present(drawable)

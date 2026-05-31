@@ -27,8 +27,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered, defer: false)
         window.title = "Strataris: Galactic Colony Defence"
-        window.center()
         window.collectionBehavior = [.fullScreenPrimary]
+        // Open maximised: fill the screen's visible frame (below the menu bar,
+        // clear of the Dock). The framebuffer is a fixed internal resolution
+        // upscaled nearest-neighbour and letterboxed to the view, so a larger
+        // window is just a bigger, aspect-correct upscale. Fall back to the
+        // 2× contentRect (already set above) and centre if there's no screen.
+        if let frame = (window.screen ?? NSScreen.main)?.visibleFrame {
+            window.setFrame(frame, display: true)
+        } else {
+            window.center()
+        }
 
         let input = InputState()
         let gamepad = Gamepad()

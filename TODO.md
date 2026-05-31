@@ -26,13 +26,9 @@ Deferred items, not yet scheduled. Pick from here when ready.
       (Drop the planet "P3" suffix into the LEVEL column.)
 
 ## Visual / polish
-- [ ] **Damaged buildings emit persistent smoke and fire.** Structures that have
-      taken damage should continuously billow smoke (and show flame at low
-      health), not just change colour/height. Should scale with damage — light
-      smoke when first hit, heavy black smoke + fire as it nears rubble — and
-      persist every frame (a particle/sprite emitter anchored to the structure
-      top, depth-tested against terrain like other sprites). Ties into the
-      existing `Structure.health` / `StructureField.stageLook` damage stages.
+- [x] **Damaged buildings emit persistent smoke and fire.** Already implemented
+      (smoke/flame scales with `Structure.health` / `StructureField.stageLook`
+      damage stages).
 
 ## Menus / UI chrome
 - [ ] **App menu bar** (currently menu-less): standard Strataris menu with
@@ -54,14 +50,9 @@ Deferred items, not yet scheduled. Pick from here when ready.
       dual-ship zip/pkg.)
 
 ## Audio / feedback
-- [ ] **Voice notifications** (synthesised speech via `AVSpeechSynthesizer`, or
-      pre-rendered): trigger on key events — "Shields low" (≤20%), "Shields
-      depleted / critical" (≤5%), "Command post under attack", "Mothership
-      detected", "Attack fleet defeated", etc. Edge-triggered, rate-limited so
-      they don't spam; respect the mute toggle.
-      - Wrap each callout in **radio comms FX**: a short burst of static/squelch
-        in before the voice, a "10-4" roger **bleep** out, slight band-limited /
-        crackly filtering on the voice for that cockpit-radio feel.
+- [x] **Voice notifications + radio comms FX.** Already implemented
+      (see `VoiceComms.swift` — edge-triggered, rate-limited callouts wrapped in
+      static/squelch/roger-bleep comms FX).
 
 ## Input
 - [ ] **Gamepad support + configure sheet.** Detect a paired controller (Xbox/
@@ -100,11 +91,12 @@ Deferred items, not yet scheduled. Pick from here when ready.
       icns into the bundle. Regenerate with `swift generate_icon.swift`.
 
 ## Window / presentation
-- [ ] **Open the game window maximised** — launch zoomed to fill the screen
-      (or full-screen) rather than the current fixed/default size. Mind the
-      voxel renderer's fixed internal `RenderConfig` resolution: the framebuffer
-      is scaled to the view, so a maximised window just means a larger upscale —
-      check it still looks right (aspect/letterboxing) at full size.
+- [x] **Open the game window maximised** — done. `AppDelegate` sets the window
+      to the screen's `visibleFrame` on launch (below the menu bar, clear of the
+      Dock). The fixed internal `RenderConfig` framebuffer is now blitted
+      through an aspect-correct **letterbox viewport** (centred 16:9 with black
+      bars), so non-16:9 screens never distort — just larger nearest-neighbour
+      upscale. Green-button full-screen uses the same path.
 
 ## Systems (already flagged as "next" candidates)
 - [ ] Title / start screen (logo, PRESS ENTER, view high scores from menu).

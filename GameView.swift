@@ -17,6 +17,7 @@ final class GameView: MTKView {
         self.gamepad = gamepad
         super.init(frame: frame, device: device)
         self.colorPixelFormat = .bgra8Unorm
+        self.clearColor = MTLClearColorMake(0, 0, 0, 1)   // letterbox bars
         self.preferredFramesPerSecond = 60
         self.isPaused = false
         self.enableSetNeedsDisplay = false   // continuous animation, driven by the internal timer
