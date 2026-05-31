@@ -58,6 +58,25 @@ final class Gamepad {
                                    "MENU", "OPTIONS", "L3", "R3",
                                    "DPAD-UP", "DPAD-DOWN", "DPAD-LEFT", "DPAD-RIGHT"]
 
+    /// Player-facing name for a control code, used in prompts and the rebind
+    /// UI (e.g. "LT" → "L-TRIGGER"). Only uses glyphs the bitmap font supports.
+    static func friendlyName(_ control: String) -> String {
+        switch control {
+        case "A", "B", "X", "Y": return "BUTTON \(control)"
+        case "LB":         return "L-BUMPER"
+        case "RB":         return "R-BUMPER"
+        case "LT":         return "L-TRIGGER"
+        case "RT":         return "R-TRIGGER"
+        case "L3":         return "L-STICK"
+        case "R3":         return "R-STICK"
+        case "DPAD-UP":    return "D-PAD UP"
+        case "DPAD-DOWN":  return "D-PAD DOWN"
+        case "DPAD-LEFT":  return "D-PAD LEFT"
+        case "DPAD-RIGHT": return "D-PAD RIGHT"
+        default:           return control      // MENU, OPTIONS
+        }
+    }
+
     static func controlValue(_ name: String, _ gp: GCExtendedGamepad) -> Float {
         switch name {
         case "A":          return gp.buttonA.value

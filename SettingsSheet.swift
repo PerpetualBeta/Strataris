@@ -77,7 +77,7 @@ final class SettingsSheet: NSObject {
             label.font = mono(12)
             label.widthAnchor.constraint(equalToConstant: 150).isActive = true
 
-            let btn = NSButton(title: gamepad.binding(for: action), target: self, action: #selector(beginCapture(_:)))
+            let btn = NSButton(title: Gamepad.friendlyName(gamepad.binding(for: action)), target: self, action: #selector(beginCapture(_:)))
             btn.bezelStyle = .rounded
             btn.font = mono(12, .semibold)
             btn.tag = i
@@ -170,7 +170,7 @@ final class SettingsSheet: NSObject {
 
     private func refreshBindTitles() {
         for (i, action) in PadAction.allCases.enumerated() {
-            bindButtons[i].title = (captureAction == action) ? "PRESS…" : gamepad.binding(for: action)
+            bindButtons[i].title = (captureAction == action) ? "PRESS…" : Gamepad.friendlyName(gamepad.binding(for: action))
         }
     }
 

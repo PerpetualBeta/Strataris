@@ -750,7 +750,7 @@ final class Renderer: NSObject, MTKViewDelegate {
                 // Reflect the live warp binding (default LT) rather than a fixed
                 // label; mention the pad only when one is connected.
                 let warpPrompt = gamepad.connected
-                    ? "\(gamepad.binding(for: .warp)) / R TO WARP"
+                    ? "\(Gamepad.friendlyName(gamepad.binding(for: .warp))) / R TO WARP"
                     : "PRESS R TO WARP"
                 voxel.drawBanner(title: "\(PlanetTheme.name(forLevel: level).uppercased()) SECURED",
                                  subtitle: "LEVEL \(level) CLEAR    \(warpPrompt)")
