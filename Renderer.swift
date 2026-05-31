@@ -853,25 +853,42 @@ final class Renderer: NSObject, MTKViewDelegate {
         }
     }
 
-    /// Save the just-rendered framebuffer (feature flag) as a PNG on the Desktop.
-    /// Native render resolution — the authentic pixel image.
+    /// Save the just-rendered framebuffer (feature flag) as a PNG on the Desktop,
+    /// upscaled 4× nearest-neighbour (480×270 → 1920×1080) so the pixels stay
+    /// crisp — ready for the README / product page / blog.
     private func saveScreenshot(from vr: VoxelRenderer) {
         let w = RenderConfig.width, h = RenderConfig.height
-        guard let rep = NSBitmapImageRep(
+        guard let native = NSBitmapImageRep(
             bitmapDataPlanes: nil, pixelsWide: w, pixelsHigh: h,
             bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
             colorSpaceName: .deviceRGB, bytesPerRow: w * 4, bitsPerPixel: 32),
-              let dst = rep.bitmapData else { return }
+              let dst = native.bitmapData else { return }
         // Framebuffer is packed 0xAABBGGRR → little-endian bytes R,G,B,A, which
         // matches NSBitmapImageRep's default (alpha last, non-premultiplied).
         memcpy(dst, vr.framebuffer, w * h * 4)
-        guard let png = rep.representation(using: .png, properties: [:]) else { return }
+
+        // Upscale 4× with no interpolation (hard pixel edges, no blur).
+        let scale = 4, uw = w * scale, uh = h * scale
+        guard let big = NSBitmapImageRep(
+            bitmapDataPlanes: nil, pixelsWide: uw, pixelsHigh: uh,
+            bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+            colorSpaceName: .deviceRGB, bytesPerRow: uw * 4, bitsPerPixel: 32),
+              let ctx = NSGraphicsContext(bitmapImageRep: big) else { return }
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = ctx
+        ctx.imageInterpolation = .none
+        native.draw(in: NSRect(x: 0, y: 0, width: uw, height: uh), from: .zero,
+                    operation: .copy, fraction: 1, respectFlipped: true,
+                    hints: [.interpolation: NSImageInterpolation.none.rawValue])
+        NSGraphicsContext.restoreGraphicsState()
+
+        guard let png = big.representation(using: .png, properties: [:]) else { return }
         let fmt = DateFormatter(); fmt.dateFormat = "yyyy-MM-dd 'at' HH.mm.ss"
         let name = "Strataris \(fmt.string(from: Date())).png"
         let dir = FileManager.default.urls(for: .desktopDirectory, in: .userDomainMask).first
             ?? FileManager.default.homeDirectoryForCurrentUser
         let url = dir.appendingPathComponent(name)
-        do { try png.write(to: url); audio.uiStart(); print("📸 screenshot → \(url.path)") }
+        do { try png.write(to: url); audio.uiStart(); print("📸 screenshot → \(url.path) (\(uw)×\(uh))") }
         catch { print("screenshot failed: \(error)") }
     }
 }
