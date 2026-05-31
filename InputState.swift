@@ -18,6 +18,8 @@ final class InputState {
         var briefing = false   // open/close the mission-briefing screen from the title
         var codex = false      // open/close the enemy-craft codex from the title
         var back = false       // Esc — close/return (backs out of briefing/codex to title)
+        var screenshot = false // feature flag: spacebar grabs a screenshot
+        var pulse = false      // feature flag: radial pulse weapon (X)
     }
 
     var kb = Controls()      // keyboard source (view writes)
@@ -38,6 +40,8 @@ final class InputState {
     var briefing: Bool  { kb.briefing  || gp.briefing }
     var codex: Bool     { kb.codex     || gp.codex }
     var back: Bool      { kb.back      || gp.back }
+    var screenshot: Bool { kb.screenshot }   // keyboard only
+    var pulse: Bool     { kb.pulse }          // keyboard only
 
     // High-score name entry (keyboard only).
     var nameEntryActive = false

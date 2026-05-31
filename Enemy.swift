@@ -137,6 +137,14 @@ final class EnemyField {
         return nil
     }
 
+    /// Radial pulse: remove every craft at once and return their positions for
+    /// explosion FX. Awards NO points (the pulse is a panic button, not a kill).
+    func obliterateAll() -> [(Float, Float, Float)] {
+        let positions = enemies.map { ($0.x, $0.y, $0.z) }
+        enemies.removeAll()
+        return positions
+    }
+
     // MARK: Update
 
     func update(dt: Float, playerX: Float, playerY: Float, playerZ: Float,

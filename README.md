@@ -89,6 +89,16 @@ detected automatically; the left stick steers/pitches and the discrete actions
 (fire, throttle, pause, warp) are **rebindable** from the controller sheet.
 Keyboard always works as a fallback.
 
+### Hidden feature flags
+
+Off by default; opt in per machine with `defaults write` (relaunch to apply):
+
+```sh
+defaults write cc.jorviksoftware.Strataris ShowFPS           -bool true  # FPS readout, top-right
+defaults write cc.jorviksoftware.Strataris ScreenshotOnSpace -bool true  # Space saves a PNG to the Desktop (keyboard fire off; gamepad fire unaffected)
+defaults write cc.jorviksoftware.Strataris RadialPulseWeapon -bool true  # 3 charges (X) that wipe all enemies — those kills don't score
+```
+
 ### Headless smoke test
 
 Exercises the hot path (terrain generation + raycaster + a slice of the game
@@ -133,6 +143,7 @@ compute shader behind the same seam if it ever needs the headroom.
 | `VoiceComms.swift` | Radio voice callouts |
 | `HighScores.swift` | Persistent high-score table |
 | `GameSettings.swift` | UserDefaults-backed settings (volumes, controls, binds) |
+| `FeatureFlags.swift` | Hidden `defaults write` feature flags |
 | `OptionsSheet.swift` / `SettingsSheet.swift` | Options / controller sheets |
 | `generate_icon.swift` | Build-time app-icon generator (not compiled in) |
 

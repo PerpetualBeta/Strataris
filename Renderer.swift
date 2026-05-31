@@ -13,6 +13,7 @@
 
 import MetalKit
 import QuartzCore
+import AppKit
 
 // Internal render resolution. 16:9, deliberately tiny. Bump later if we want
 // a sharper look; the CPU cost scales with width × distance-steps.
@@ -101,6 +102,14 @@ final class Renderer: NSObject, MTKViewDelegate {
     private lazy var comms = VoiceComms(audio: audio)
     private let gamepad: Gamepad
     private var muteLatch = false
+
+    // Feature-flag state (hidden flags; see FeatureFlags).
+    private var fpsSmoothed: Float = 0          // showFPS readout
+    private var screenshotPending = false       // screenshotOnSpace request (edge)
+    private var screenshotLatch = false
+    private var pulseCharges = FeatureFlags.radialPulseWeapon ? 3 : 0   // radialPulseWeapon, per run
+    private var pulseLatch = false
+    private var wasPlaying = false              // edge-detect level start (Easter egg)
 
     // Voice-callout edge tracking.
     private var voiceLowArmed = true, voiceCritArmed = true
@@ -453,6 +462,9 @@ final class Renderer: NSObject, MTKViewDelegate {
         lastTime = now
         if state != .title && state != .lost && !paused { missionTime += dt }   // mission clock
 
+        // Smoothed FPS for the optional HUD readout.
+        if dt > 0 { fpsSmoothed += (1 / dt - fpsSmoothed) * 0.1 }
+
         // Refresh gamepad each frame; ignore its input while the sheet is open.
         gamepad.poll(input)
         if gamepad.configuring { input.gp = InputState.Controls() }
@@ -460,6 +472,15 @@ final class Renderer: NSObject, MTKViewDelegate {
         // Mute toggle (works in every state).
         if input.mute && !muteLatch { audio.muted.toggle(); muteLatch = true }
         if !input.mute { muteLatch = false }
+
+        // Screenshot request (feature flag) — edge-triggered; captured at present.
+        if input.screenshot && !screenshotLatch { screenshotLatch = true; screenshotPending = true }
+        if !input.screenshot { screenshotLatch = false }
+
+        // Level-start edge (entered .playing from anything else). Pausing keeps
+        // state == .playing, so resuming doesn't re-trigger.
+        if state == .playing && !wasPlaying { onLevelStart() }
+        wasPlaying = (state == .playing)
 
         // Title / attract screen — wait for Enter to drop into the (already
         // built) planet 1, then run the normal pipeline from the next frame.
@@ -607,6 +628,20 @@ final class Renderer: NSObject, MTKViewDelegate {
         voxel.render(camera: camera)
 
         if active {
+            // Radial pulse weapon (feature flag): wipe every remaining craft.
+            // No score for these kills. Clearing the field trips the normal
+            // "planet cleared" win below.
+            if input.pulse && !pulseLatch {
+                pulseLatch = true
+                if pulseCharges > 0 && enemies.remaining > 0 {
+                    pulseCharges -= 1
+                    let wreckage = enemies.obliterateAll()
+                    combat.detonate(at: wreckage, smoke: smoke)
+                    audio.pulse()
+                }
+            }
+            if !input.pulse { pulseLatch = false }
+
             structures.tick(dt: dt)
             enemies.update(dt: dt, playerX: camera.x, playerY: camera.y, playerZ: camera.height,
                            structures: structures, projectiles: projectiles, bombs: bombs)
@@ -700,6 +735,7 @@ final class Renderer: NSObject, MTKViewDelegate {
                 restartLatch = true
                 level = 1
                 combat = Combat()               // game over — fresh run
+                pulseCharges = FeatureFlags.radialPulseWeapon ? 3 : 0
                 missionTime = 0
                 loadPlanet(1)
             }
@@ -734,6 +770,7 @@ final class Renderer: NSObject, MTKViewDelegate {
                           roll: camera.roll, pitch: camera.pitch)
         voxel.drawRadar(camera: camera, enemies: enemies, structures: structures)
         chrono(on: voxel)
+        if FeatureFlags.radialPulseWeapon { voxel.drawPulseCharges(pulseCharges) }
 
         if paused && state == .playing {
             voxel.drawBanner(title: "PAUSED", subtitle: "PRESS P TO RESUME")
@@ -772,6 +809,8 @@ final class Renderer: NSObject, MTKViewDelegate {
 
     /// Upload the given renderer's framebuffer and blit it to the drawable.
     private func present(in view: MTKView, from vr: VoxelRenderer) {
+        if FeatureFlags.showFPS { vr.drawFPS(Int(fpsSmoothed.rounded())) }
+        if screenshotPending { screenshotPending = false; saveScreenshot(from: vr) }
         let region = MTLRegionMake2D(0, 0, RenderConfig.width, RenderConfig.height)
         texture.replace(region: region, mipmapLevel: 0,
                         withBytes: vr.framebuffer, bytesPerRow: bytesPerRow)
@@ -803,5 +842,36 @@ final class Renderer: NSObject, MTKViewDelegate {
         enc.endEncoding()
         cmd.present(drawable)
         cmd.commit()
+    }
+
+    /// Fired once when a level begins playing (see the edge detector in update).
+    private func onLevelStart() {
+        // Easter egg: on May the 4th (or when forced for testing), a send-off.
+        let c = Calendar.current.dateComponents([.month, .day], from: Date())
+        if (c.month == 5 && c.day == 4) || FeatureFlags.forceMayTheFourth {
+            comms.say("May the fourth be with you")
+        }
+    }
+
+    /// Save the just-rendered framebuffer (feature flag) as a PNG on the Desktop.
+    /// Native render resolution — the authentic pixel image.
+    private func saveScreenshot(from vr: VoxelRenderer) {
+        let w = RenderConfig.width, h = RenderConfig.height
+        guard let rep = NSBitmapImageRep(
+            bitmapDataPlanes: nil, pixelsWide: w, pixelsHigh: h,
+            bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+            colorSpaceName: .deviceRGB, bytesPerRow: w * 4, bitsPerPixel: 32),
+              let dst = rep.bitmapData else { return }
+        // Framebuffer is packed 0xAABBGGRR → little-endian bytes R,G,B,A, which
+        // matches NSBitmapImageRep's default (alpha last, non-premultiplied).
+        memcpy(dst, vr.framebuffer, w * h * 4)
+        guard let png = rep.representation(using: .png, properties: [:]) else { return }
+        let fmt = DateFormatter(); fmt.dateFormat = "yyyy-MM-dd 'at' HH.mm.ss"
+        let name = "Strataris \(fmt.string(from: Date())).png"
+        let dir = FileManager.default.urls(for: .desktopDirectory, in: .userDomainMask).first
+            ?? FileManager.default.homeDirectoryForCurrentUser
+        let url = dir.appendingPathComponent(name)
+        do { try png.write(to: url); audio.uiStart(); print("📸 screenshot → \(url.path)") }
+        catch { print("screenshot failed: \(error)") }
     }
 }

@@ -61,4 +61,13 @@ final class Combat {
         explosions.removeAll()
         tracerTimer = 0
     }
+
+    /// Spawn explosions + debris at the given points without scoring (used by
+    /// the radial pulse weapon, which destroys craft but awards no points).
+    func detonate(at positions: [(Float, Float, Float)], smoke: SmokeField) {
+        for p in positions {
+            explosions.append(Explosion(x: p.0, y: p.1, z: p.2, age: 0))
+            smoke.burst(x: p.0, y: p.1, z: p.2, big: true)
+        }
+    }
 }

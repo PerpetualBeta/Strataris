@@ -45,6 +45,7 @@ SWIFT_SOURCES    := main.swift \
                     VoiceComms.swift \
                     Gamepad.swift \
                     GameSettings.swift \
+                    FeatureFlags.swift \
                     SettingsSheet.swift \
                     OptionsSheet.swift
 

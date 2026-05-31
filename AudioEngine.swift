@@ -209,6 +209,11 @@ final class AudioEngine {
         trigger(wave: AudioEngine.sine,   f0: 70, f1: 20,  dur: 0.72, amp: 0.22, delay: 0.04)
     }
     func warp() { trigger(wave: AudioEngine.sine, f0: 200, f1: 1300, dur: 0.5, amp: 0.22) }
+    func pulse() {                                          // radial pulse: rising sweep + boom
+        trigger(wave: AudioEngine.sine,   f0: 120, f1: 1600, dur: 0.35, amp: 0.22)
+        trigger(wave: AudioEngine.noise,  f0: 1, f1: 1,      dur: 0.55, amp: 0.34, delay: 0.12)
+        trigger(wave: AudioEngine.square, f0: 90, f1: 24,    dur: 0.55, amp: 0.26, delay: 0.12)
+    }
     func whoosh(rising: Bool) {                              // launch / re-entry sweep
         trigger(wave: AudioEngine.noise, f0: 1, f1: 1, dur: 0.8, amp: 0.16)
         trigger(wave: AudioEngine.sine, f0: rising ? 180 : 1300, f1: rising ? 1300 : 180, dur: 0.8, amp: 0.14)
