@@ -1056,10 +1056,10 @@ final class VoxelRenderer {
             Font.draw(p, into: fb, w: W, h: H, x: (W - Font.width(p, scale: 2)) / 2,
                       y: H - 76, scale: 2, color: packRGBA(255, 255, 255))
         }
-        let menu = "B MISSION BRIEFING        V ENEMY INTEL"
+        let menu = "[B] MISSION BRIEFING    [V] ENEMY INTEL"
         Font.draw(menu, into: fb, w: W, h: H, x: (W - Font.width(menu, scale: 1)) / 2,
                   y: H - 54, scale: 1, color: packRGBA(130, 200, 235))
-        let hi = String(format: "HI %06d   ", topScore) + (topName ?? "---")
+        let hi = String(format: "High Score: %06d   ", topScore) + (topName ?? "---")
         drawUnicodeCentered(hi, y: H - 38, fontSize: 11, 1.0, 0.86, 0.4)
         let ctrl = "ARROWS STEER   SPACE FIRE   PLUS/MINUS THROTTLE   P PAUSE"
         Font.draw(ctrl, into: fb, w: W, h: H, x: (W - Font.width(ctrl, scale: 1)) / 2,
@@ -1131,7 +1131,7 @@ final class VoxelRenderer {
 
         // Footer prompts.
         fillRect(pX + 4, pY + pH - 16, pW - 8, 1, accent)
-        let foot = "ENTER  ENGAGE        B  STAND DOWN"
+        let foot = "[ENTER] ENGAGE    [ESC] STAND DOWN"
         Font.draw(foot, into: framebuffer, w: W, h: H, x: (W - Font.width(foot)) / 2, y: pY + pH - 11, color: dashGreen)
 
         // Scrolling body between the two divider lines.
@@ -1186,7 +1186,7 @@ final class VoxelRenderer {
         Font.draw(rt, into: framebuffer, w: W, h: H, x: pX + pW - 6 - Font.width(rt), y: pY + 5, color: dashDim)
         fillRect(pX + 4, pY + 15, pW - 8, 1, accent)
         fillRect(pX + 4, pY + pH - 16, pW - 8, 1, accent)
-        let foot = "ENTER  ENGAGE        V  CLOSE"
+        let foot = "[ENTER] ENGAGE    [ESC] CLOSE"
         Font.draw(foot, into: framebuffer, w: W, h: H, x: (W - Font.width(foot)) / 2, y: pY + pH - 11, color: dashGreen)
 
         let meshes = [Mesh.drone(), Mesh.fighter(), Mesh.destroyer(), Mesh.mothership()]
