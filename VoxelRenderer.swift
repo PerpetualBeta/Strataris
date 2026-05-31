@@ -192,6 +192,16 @@ final class VoxelRenderer {
                 if let p = project(px, py, pz, camera: camera) { sx[vi] = p.x; sy[vi] = p.y; sd[vi] = p.depth; ok[vi] = true }
             }
 
+            // Mesh centroid (world space) — used to orient each face normal
+            // outward. The hulls are convex, so a normal that points away from
+            // the centroid faces outward regardless of how the face was wound.
+            // This makes backface culling winding-independent: the fighter /
+            // destroyer wedge has mixed winding, which previously left some
+            // front faces culled (holes in the hull).
+            var mcx: Float = 0, mcy: Float = 0, mcz: Float = 0
+            for vi in 0..<n { mcx += wx[vi]; mcy += wy[vi]; mcz += wz[vi] }
+            mcx /= Float(n); mcy /= Float(n); mcz /= Float(n)
+
             // Draw the craft whole or not at all: if any vertex is behind or
             // hard up against the camera near-plane, the projection blows up
             // (stretched/torn triangles), so skip the entire ship. The 14-unit
@@ -212,6 +222,8 @@ final class VoxelRenderer {
                 let nl = sqrtf(nx * nx + ny * ny + nz * nz); if nl < 1e-5 { continue }
                 nx /= nl; ny /= nl; nz /= nl
                 let cxw = (wx[ia] + wx[ib] + wx[ic]) / 3, cyw = (wy[ia] + wy[ib] + wy[ic]) / 3, czw = (wz[ia] + wz[ib] + wz[ic]) / 3
+                // Orient outward (away from the mesh centroid), then cull/shade.
+                if nx * (cxw - mcx) + ny * (cyw - mcy) + nz * (czw - mcz) < 0 { nx = -nx; ny = -ny; nz = -nz }
                 if nx * (camX - cxw) + ny * (camY - cyw) + nz * (camZ - czw) <= 0 { continue }   // backface
                 var b = nx * lx + ny * ly + nz * lz
                 b = 0.35 + 0.65 * max(0, b)
