@@ -26,5 +26,13 @@
 	<true/>
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.action-games</string>
+	<key>SUFeedURL</key>
+	<string>https://jorviksoftware.cc/appcasts/strataris.xml</string>
+	<key>SUPublicEDKey</key>
+	<string>zVc7rs8EiLmlDAYpgaIItjnHtsCkvyVVub+I0/sSb3Q=</string>
+	<key>SUEnableAutomaticChecks</key>
+	<true/>
+	<key>SUScheduledCheckInterval</key>
+	<integer>86400</integer>
 </dict>
 </plist>

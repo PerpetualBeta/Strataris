@@ -49,5 +49,6 @@ SWIFT_SOURCES    := main.swift \
                     OptionsSheet.swift
 
 PACKAGE_TYPE     := zip
+EMBEDDED_FRAMEWORKS := Sparkle
 
 include ../jorvik-release/release.mk

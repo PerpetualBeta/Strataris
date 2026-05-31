@@ -3,16 +3,20 @@
 Deferred items, not yet scheduled. Pick from here when ready.
 
 ## Marketing / write-up angles (for README, product page, blog post)
-- [ ] **Tiny footprint — the whole game is ~1 MB.** The entire `.app` bundle
-      (universal binary included) is about **1 MB** — it would fit on a 1.44 MB
-      floppy disk, and it's *smaller than the asset payload of many single web
-      pages*. Lead with this. The reason is the hook: **there are zero asset
-      files** — every pixel and every sound is generated procedurally in code.
-      Terrain (seamless fbm), the 3D ship hulls (flat-shaded meshes), the music
-      and SFX (a code synth), the radio voice (offline-rendered + filtered), the
-      fonts, the particle smoke/fire — all synthesised at runtime. No textures,
-      no audio files, no models to ship. Genuinely in the 16-bit spirit:
-      demoscene-style "everything from maths," running as a native Mac app.
+- [ ] **Tiny footprint — the whole game is ~1 MB.** The game itself — the
+      universal binary with **every pixel and sound generated in code** — is
+      about **1.1 MB**, *smaller than the asset payload of many single web
+      pages*, and it would fit on a 1.44 MB floppy. Lead with this. The hook:
+      **there are zero asset files** — terrain (seamless fbm), the 3D ship hulls
+      (flat-shaded meshes), the music and SFX (a code synth), the radio voice
+      (offline-rendered + filtered), the fonts, the particle smoke/fire — all
+      synthesised at runtime. No textures, no audio files, no models to ship.
+      Demoscene-style "everything from maths," running as a native Mac app.
+      - **Framing note (post-Sparkle):** the *shipped* `.app` is ~5.6 MB because
+        it embeds the **Sparkle** auto-updater framework (~3 MB) and its helper
+        apps. So phrase it as **"the game itself is ~1 MB; the rest of the
+        download is just the auto-updater."** Don't claim the whole download
+        fits on a floppy anymore — the *game* does; the bundle doesn't.
 
 ## Scoring
 - [ ] **Stardate on high-score entries** — record a timestamp at the moment a
@@ -58,13 +62,16 @@ Deferred items, not yet scheduled. Pick from here when ready.
       sheet. (Difficulty slider still future work.)
 
 ## Distribution / release
-- [ ] **Sparkle auto-updater.** Embed `Sparkle.framework` (the Makefile already
-      supports `EMBEDDED_FRAMEWORKS := Sparkle`, as SpaceMan etc. do): add the
-      EdDSA key pair, `SUFeedURL` + `SUPublicEDKey` to Info.plist, an
-      `SPUStandardUpdaterController` wired to a "Check for Updates" menu item,
-      and publish an appcast.xml. Mirror the setup from an existing Sparkle
-      Jorvik app. (Release pipeline already signs/notarises/staples + can
-      dual-ship zip/pkg.)
+- [x] **Sparkle auto-updater** — done. Embedded `Sparkle.framework`
+      (`EMBEDDED_FRAMEWORKS := Sparkle`); Info.plist has `SUFeedURL`
+      (`…/appcasts/strataris.xml`), the shared Jorvik `SUPublicEDKey`, and
+      24 h scheduled checks; `SPUStandardUpdaterController` starts on launch and
+      a "Check for Updates…" item sits in the app menu. Uses the existing
+      machine EdDSA signing key (no new key minted).
+      - [ ] **Publish `strataris.xml`** to jorviksoftware.cc/appcasts/ at first
+            release (sign the build with `sign_update`). Until it exists,
+            "Check for Updates…" will just report no update / a feed error —
+            expected pre-release.
 
 ## Audio / feedback
 - [x] **Voice notifications + radio comms FX.** Already implemented

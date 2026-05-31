@@ -6,6 +6,7 @@
 
 import Cocoa
 import MetalKit
+import Sparkle
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var window: NSWindow!
@@ -13,8 +14,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var renderer: Renderer!
     private var gamepad: Gamepad!
 
+    // Sparkle auto-updater. Shares the Jorvik EdDSA signing key; feed + public
+    // key live in Info.plist. Starts on launch (scheduled background checks)
+    // and is driven manually from the Check for Updates… menu item.
+    private lazy var updater = SPUStandardUpdaterController(
+        startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil)
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         installMainMenu()
+        _ = updater   // touch the lazy controller so the updater starts
 
         guard let device = MTLCreateSystemDefaultDevice() else {
             fatalError("Strataris: no Metal-capable GPU found")
@@ -89,6 +97,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         appMenu.addItem(.separator())
 
+        let updates = NSMenuItem(title: "Check for Updates…", action: #selector(checkForUpdates(_:)), keyEquivalent: "")
+        updates.target = self
+        appMenu.addItem(updates)
+
+        appMenu.addItem(.separator())
+
         appMenu.addItem(withTitle: "Hide Strataris",
                         action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
         let hideOthers = appMenu.addItem(withTitle: "Hide Others",
@@ -123,6 +137,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Standard macOS About panel, populated with the app icon, version, and a
     /// Jorvik credit / tagline. Native and dependency-free (no SwiftUI), in
     /// keeping with the game's tiny, all-procedural footprint.
+    @objc func checkForUpdates(_ sender: Any?) {
+        NSApp.activate(ignoringOtherApps: true)
+        updater.checkForUpdates(sender)
+    }
+
     @objc func openOptions() {
         guard let win = window else { return }
         OptionsSheet.present(over: win, audio: renderer.audio, gamepad: gamepad, highScores: renderer.highScores)
