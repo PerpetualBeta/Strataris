@@ -39,6 +39,14 @@ Deferred items, not yet scheduled. Pick from here when ready.
       (`orderFrontStandardAboutPanel`) showing the app icon, version, a
       "Galactic Colony Defence" tagline, the zero-asset hook, and the Jorvik
       credit. Native/dependency-free (no SwiftUI) to keep the footprint tiny.
+- [ ] **About modal — add links** to the game product page (once it exists)
+      and the GitHub repo (once public). The `.credits` attributed string
+      supports clickable links via `.link` attributes; add a product-page URL
+      and `https://github.com/PerpetualBeta/Strataris` as a footer line.
+      Deferred until both destinations are live. (NB: if we end up wanting
+      richer link styling/behaviour, this is the point where reusing the
+      suite's `JorvikAboutView` could be reconsidered — see the footprint
+      trade-off noted when the panel was first built.)
 - [ ] **Settings… menu item** — add to the app menu once the options screen
       below exists (key equivalent ⌘,).
 - [ ] **Game options screen** — toggles/sliders for Music volume, SFX volume,
