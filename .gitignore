@@ -1,0 +1,13 @@
+# Build output
+.build/
+
+# Release artifacts
+*.zip
+*.pkg
+*.dmg
+
+# macOS
+.DS_Store
+
+# High-score saves / local data
+highscores.json

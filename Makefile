@@ -1,0 +1,51 @@
+# Strataris: Galactic Colony Defence — first-person voxel-terrain shoot-'em-up.
+#
+# First NATIVE game in the Jorvik suite (the others — Star Raiders, Rescue
+# on Fractalus, Centipede, Mr. Do!, Gauntlet — are HTML/canvas tributes).
+# Built with swiftc + a runtime-compiled Metal blit shader; the voxel
+# terrain is rendered on the CPU into a low-res framebuffer and upscaled
+# nearest-neighbour for that period-correct pixelated look.
+#
+# Release pipeline delegated to the shared `release.mk` from
+# PerpetualBeta/jorvik-release.
+#
+# NAME NOTE: the product name lives in BUNDLE_NAME / PRODUCT_NAME / BUNDLE_ID
+# below (+ the enclosing folder). Nothing in the Swift sources hard-codes it.
+
+BUNDLE_NAME      := Strataris
+BUNDLE_TYPE      := app
+PRODUCT_NAME     := Strataris.app
+BUNDLE_ID        := cc.jorviksoftware.Strataris
+BUILD_SYSTEM     := swiftc
+
+# MetalKit pulls in Metal; QuartzCore gives us CACurrentMediaTime for the
+# frame clock. simd is a Swift module (no -framework needed) and unused here.
+SWIFT_FRAMEWORKS := Cocoa Metal MetalKit QuartzCore AVFoundation GameController
+
+SWIFT_SOURCES    := main.swift \
+                    AppDelegate.swift \
+                    GameView.swift \
+                    Renderer.swift \
+                    VoxelRenderer.swift \
+                    Terrain.swift \
+                    Camera.swift \
+                    InputState.swift \
+                    Sprite.swift \
+                    Mesh.swift \
+                    Enemy.swift \
+                    Structure.swift \
+                    Combat.swift \
+                    Smoke.swift \
+                    Font.swift \
+                    PlanetTheme.swift \
+                    Projectile.swift \
+                    TextImage.swift \
+                    HighScores.swift \
+                    AudioEngine.swift \
+                    VoiceComms.swift \
+                    Gamepad.swift \
+                    SettingsSheet.swift
+
+PACKAGE_TYPE     := zip
+
+include ../jorvik-release/release.mk
