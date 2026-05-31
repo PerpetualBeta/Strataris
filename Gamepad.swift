@@ -9,8 +9,12 @@
 import GameController
 
 /// A rebindable discrete control. Steering stays on the left stick (not bound).
+///
+/// `pulse` and `screenshot` are optional — they only exist when their hidden
+/// feature flag is enabled (see `activeCases`). The flight controls are always
+/// present.
 enum PadAction: String, CaseIterable {
-    case fire, throttleUp, throttleDown, pause, warp
+    case fire, throttleUp, throttleDown, pause, warp, pulse, screenshot
 
     var title: String {
         switch self {
@@ -19,6 +23,8 @@ enum PadAction: String, CaseIterable {
         case .throttleDown: return "THROTTLE -"
         case .pause:        return "PAUSE / START"
         case .warp:         return "WARP"
+        case .pulse:        return "RADIAL PULSE"
+        case .screenshot:   return "SCREENSHOT"
         }
     }
 
@@ -30,7 +36,19 @@ enum PadAction: String, CaseIterable {
         case .throttleDown: return "LB"
         case .pause:        return "MENU"
         case .warp:         return "LT"
+        case .pulse:        return "X"
+        case .screenshot:   return "Y"
         }
+    }
+
+    /// The actions actually shown in the rebind sheet and polled each frame.
+    /// The optional pulse / screenshot actions appear only while their feature
+    /// flag is on, so players never see controls for features they can't use.
+    static var activeCases: [PadAction] {
+        var cases: [PadAction] = [.fire, .throttleUp, .throttleDown, .pause, .warp]
+        if FeatureFlags.radialPulseWeapon { cases.append(.pulse) }
+        if FeatureFlags.screenshotOnSpace { cases.append(.screenshot) }
+        return cases
     }
 }
 
@@ -51,6 +69,7 @@ final class Gamepad {
     // Live state for the settings sheet's input preview.
     private(set) var stickX: Float = 0, stickY: Float = 0
     private(set) var firing = false, throttleUp = false, throttleDown = false, menu = false, warpHeld = false
+    private(set) var pulseHeld = false, shotHeld = false   // optional, flag-gated
 
     // Bindable controls and how to read each one from a GCExtendedGamepad.
     // Order is the pick list shown when capturing a new binding.
@@ -151,7 +170,7 @@ final class Gamepad {
             name = "—"
             input.gp = .init()
             stickX = 0; stickY = 0; firing = false; throttleUp = false; throttleDown = false
-            menu = false; warpHeld = false
+            menu = false; warpHeld = false; pulseHeld = false; shotHeld = false
             return
         }
         connected = true
@@ -166,6 +185,9 @@ final class Gamepad {
         throttleDown = down(.throttleDown, gp)
         menu = down(.pause, gp)
         warpHeld = down(.warp, gp)
+        // Optional, flag-gated actions — only read when their feature is on.
+        pulseHeld = FeatureFlags.radialPulseWeapon && down(.pulse, gp)
+        shotHeld = FeatureFlags.screenshotOnSpace && down(.screenshot, gp)
 
         var c = InputState.Controls()
         if lx < -deadzone { c.bankLeft = true }
@@ -180,6 +202,8 @@ final class Gamepad {
         if menu { c.pause = true; c.restart = true }   // pause / start / confirm menus
         if fireConfirms && firing { c.restart = true } // fire also starts / restarts (optional)
         if warpHeld { c.warp = true }
+        if pulseHeld { c.pulse = true }
+        if shotHeld { c.screenshot = true }
         input.gp = c
     }
 }

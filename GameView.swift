@@ -73,11 +73,12 @@ final class GameView: MTKView {
         case kVK_RightArrow:                input.kb.bankRight = down
         case kVK_UpArrow:                   input.kb.climb = down
         case kVK_DownArrow:                 input.kb.dive = down
-        case kVK_Space:
-            // Feature flag: spacebar grabs a screenshot instead of firing.
-            // (Gamepad fire is unaffected — it has its own binding.)
-            if FeatureFlags.screenshotOnSpace { input.kb.screenshot = down }
-            else { input.kb.fire = down }
+        case kVK_Space:                     input.kb.fire = down    // Space is always fire
+        case kVK_ANSI_F:
+            // Feature flag: F grabs a screenshot. On its own key (not Space) so
+            // keyboard-only players can still fire. Gamepad uses its own binding.
+            guard FeatureFlags.screenshotOnSpace else { return false }
+            input.kb.screenshot = down
         case kVK_ANSI_X:                    input.kb.pulse = down   // feature flag: radial pulse
         case kVK_ANSI_R, kVK_Return, kVK_ANSI_KeypadEnter:
             input.kb.restart = down

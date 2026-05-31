@@ -2,7 +2,7 @@
 //
 // Off by default; opt in per machine with `defaults write`, e.g.
 //   defaults write cc.jorviksoftware.Strataris ShowFPS            -bool true
-//   defaults write cc.jorviksoftware.Strataris ScreenshotOnSpace  -bool true
+//   defaults write cc.jorviksoftware.Strataris ScreenshotOnSpace  -bool true   (F key)
 //   defaults write cc.jorviksoftware.Strataris RadialPulseWeapon  -bool true
 // Read live each frame, so toggling takes effect on the next launch (or
 // immediately, for flags re-read every frame).
@@ -15,8 +15,9 @@ enum FeatureFlags {
     /// Digital FPS readout, top-right of the HUD.
     static var showFPS: Bool { d.bool(forKey: "ShowFPS") }
 
-    /// Spacebar takes a screenshot instead of firing (keyboard only — gamepad
-    /// fire is unaffected).
+    /// Enables the screen-capture control: the F key (keyboard) and a
+    /// rebindable gamepad button. Space stays fire so keyboard-only players can
+    /// still shoot. (Flag name is kept for back-compat with existing installs.)
     static var screenshotOnSpace: Bool { d.bool(forKey: "ScreenshotOnSpace") }
 
     /// Grants 3 radial-pulse charges (X key) that wipe every remaining enemy.

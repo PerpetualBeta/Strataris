@@ -70,9 +70,10 @@ final class SettingsSheet: NSObject {
         bindHdr.font = mono(11, .bold)
         bindHdr.textColor = .secondaryLabelColor
 
-        // One row per rebindable action.
+        // One row per rebindable action. Flag-gated actions (radial pulse,
+        // screenshot) appear only while their feature flag is on.
         var rows: [NSView] = []
-        for (i, action) in PadAction.allCases.enumerated() {
+        for (i, action) in PadAction.activeCases.enumerated() {
             let label = NSTextField(labelWithString: action.title)
             label.font = mono(12)
             label.widthAnchor.constraint(equalToConstant: 150).isActive = true
@@ -164,19 +165,22 @@ final class SettingsSheet: NSObject {
         if gamepad.throttleDown { parts.append("THR−") }
         if gamepad.menu { parts.append("START") }
         if gamepad.warpHeld { parts.append("WARP") }
+        if gamepad.pulseHeld { parts.append("PULSE") }
+        if gamepad.shotHeld { parts.append("SHOT") }
         previewLabel.stringValue = "INPUT:  " + (parts.isEmpty ? "—" : parts.joined(separator: "  "))
         previewLabel.textColor = parts.isEmpty ? .tertiaryLabelColor : .labelColor
     }
 
     private func refreshBindTitles() {
-        for (i, action) in PadAction.allCases.enumerated() {
+        for (i, action) in PadAction.activeCases.enumerated() {
             bindButtons[i].title = (captureAction == action) ? "PRESS…" : Gamepad.friendlyName(gamepad.binding(for: action))
         }
     }
 
     @objc private func beginCapture(_ sender: NSButton) {
-        guard sender.tag >= 0 && sender.tag < PadAction.allCases.count else { return }
-        captureAction = PadAction.allCases[sender.tag]
+        let cases = PadAction.activeCases
+        guard sender.tag >= 0 && sender.tag < cases.count else { return }
+        captureAction = cases[sender.tag]
         captureArmed = false
         refreshBindTitles()
     }
