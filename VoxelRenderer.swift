@@ -1037,7 +1037,7 @@ final class VoxelRenderer {
             drawUnicodeCol("\(e.level)", x: lvlX, y: yy, maxWidth: lvlW, fontSize: 10, r, g, b, center: true)
             yy += 15
         }
-        drawUnicodeCentered("PRESS R TO RESTART", y: height - 14, fontSize: 10, 0.85, 0.9, 1.0)
+        drawUnicodeCentered("PRESS R TO RESTART      [ESC] TITLE SCREEN", y: height - 14, fontSize: 10, 0.85, 0.9, 1.0)
     }
 
     // MARK: Title overlay (drawn OVER the live attract-mode flyover)

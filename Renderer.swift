@@ -84,6 +84,7 @@ final class Renderer: NSObject, MTKViewDelegate {
     private var briefingTime: Float = 0     // scroll clock for the briefing crawl
     private var codexLatch = false
     private var codexTime: Float = 0        // spin clock for the codex models
+    private var backLatch = false           // Esc on the game-over screen → title
 
     private let maxShield: Float = 100
     private var shield: Float = 100
@@ -453,6 +454,21 @@ final class Renderer: NSObject, MTKViewDelegate {
         }
     }
 
+    /// Abandon the current run and go back to the attract/title screen, leaving
+    /// a fresh planet 1 staged so the next ENTER starts a clean game (the title
+    /// → playing transition doesn't reload a planet itself).
+    private func returnToTitle() {
+        level = 1
+        combat = Combat()
+        pulseCharges = FeatureFlags.radialPulseWeapon ? 3 : 0
+        missionTime = 0
+        loadPlanet(1)           // stage a clean run (also sets state = .playing)…
+        state = .title          // …but show the attract screen until ENGAGE
+        input.resetControls()
+        lastTitleBeat = -1      // restart the title theme cleanly
+        audio.uiStart()
+    }
+
     func draw(in view: MTKView) {
         // Frame clock. First frame establishes the baseline; clamp dt so a
         // hitch (or a breakpoint) can't fling the camera across the map.
@@ -739,7 +755,15 @@ final class Renderer: NSObject, MTKViewDelegate {
                 missionTime = 0
                 loadPlanet(1)
             }
+            // Esc on the high-score table backs out to the title screen. (During
+            // name entry the key system swallows Esc, so this only fires once the
+            // table is showing — exactly when the player expects it.)
+            if input.back && !backLatch && !awaitingName {
+                backLatch = true
+                returnToTitle()
+            }
         }
+        if !input.back { backLatch = false }
         if !input.restart { restartLatch = false }
         if !input.warp { warpLatch = false }
 
