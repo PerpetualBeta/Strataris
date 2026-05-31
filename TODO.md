@@ -12,11 +12,14 @@ Deferred items, not yet scheduled. Pick from here when ready.
       (offline-rendered + filtered), the fonts, the particle smoke/fire — all
       synthesised at runtime. No textures, no audio files, no models to ship.
       Demoscene-style "everything from maths," running as a native Mac app.
-      - **Framing note (post-Sparkle):** the *shipped* `.app` is ~5.6 MB because
+      - **Framing note (post-Sparkle):** the *shipped* `.app` is ~5.7 MB because
         it embeds the **Sparkle** auto-updater framework (~3 MB) and its helper
         apps. So phrase it as **"the game itself is ~1 MB; the rest of the
         download is just the auto-updater."** Don't claim the whole download
         fits on a floppy anymore — the *game* does; the bundle doesn't.
+      - **README done** — rewritten as a full product README leading with this
+        hook (game ~1.2 MB, zero asset files, bundle ~5.7 MB w/ Sparkle).
+        Still to do: **product page** and **blog post** reusing the same angle.
 
 ## Scoring
 - [ ] **Stardate on high-score entries** — record a timestamp at the moment a
