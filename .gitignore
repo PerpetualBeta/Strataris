@@ -9,5 +9,8 @@
 # macOS
 .DS_Store
 
+# Icon generator intermediate (AppIcon.icns itself is committed)
+AppIcon.iconset/
+
 # High-score saves / local data
 highscores.json

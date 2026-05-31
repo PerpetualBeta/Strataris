@@ -90,12 +90,14 @@ Deferred items, not yet scheduled. Pick from here when ready.
       Reachable from the title menu; in the same cockpit-display visual style.
 
 ## Branding / assets
-- [ ] **App icon.** Design a Strataris app icon (the macOS `.icns` / Asset
-      catalog set: 16–1024px). Should evoke the game — e.g. a low-poly craft
-      over voxel terrain under an alien sky, or the cockpit horizon/radar motif,
-      in the dark dramatic palette of the title screen. Original artwork (no
-      copyrighted refs). Wire into the app bundle (Info.plist `CFBundleIconFile`
-      / `Assets.xcassets`) so it shows in Dock, Finder, and the About modal.
+- [x] **App icon.** Done — `generate_icon.swift` renders `AppIcon.icns`
+      procedurally (no source art file, true to the zero-asset ethos),
+      combining the established Jorvik visual language: the brand-blue
+      rounded-square badge + wireframe globe backdrop (from BrowserCommander /
+      BrowserNotes) with the swept-fin rocket glyph tilted 45° right (from
+      SpaceMan's menu-bar icon) atop it — a craft over a world. Wired via
+      Info.plist `CFBundleIconFile = AppIcon`; release.mk copies the root-level
+      icns into the bundle. Regenerate with `swift generate_icon.swift`.
 
 ## Window / presentation
 - [ ] **Open the game window maximised** — launch zoomed to fill the screen
