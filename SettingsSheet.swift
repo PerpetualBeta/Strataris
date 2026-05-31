@@ -1,8 +1,9 @@
 // Strataris — controller settings sheet.
 //
-// Opened with C. Shows the detected controller (live), a live input preview so
-// you can confirm it's working, the control mapping, an invert-pitch toggle and
-// a deadzone slider. While open, Gamepad.configuring pauses the game.
+// Opened with C (or Controller… in the app menu). Shows the detected controller
+// (live), a live input preview, and a rebindable mapping: click an action's
+// button, then press any controller button/trigger to bind it. The left stick
+// always steers/pitches. While open, Gamepad.configuring pauses the game.
 
 import Cocoa
 
@@ -16,6 +17,14 @@ final class SettingsSheet: NSObject {
 
     private let statusLabel = NSTextField(labelWithString: "")
     private let previewLabel = NSTextField(labelWithString: "")
+
+    // One bind button per action (aligned with PadAction.allCases by tag).
+    private var bindButtons: [NSButton] = []
+
+    // Capture state: the action awaiting a press, and whether all controls have
+    // been released since capture began (so a held control doesn't auto-bind).
+    private var captureAction: PadAction?
+    private var captureArmed = false
 
     static func present(over window: NSWindow, gamepad: Gamepad) {
         guard current == nil else { return }
@@ -35,10 +44,10 @@ final class SettingsSheet: NSObject {
     private init(gamepad: Gamepad, parent: NSWindow) {
         self.gamepad = gamepad
         self.parent = parent
-        sheet = SheetWindow(contentRect: NSRect(x: 0, y: 0, width: 440, height: 340),
+        sheet = SheetWindow(contentRect: NSRect(x: 0, y: 0, width: 460, height: 520),
                             styleMask: [.titled], backing: .buffered, defer: false)
         super.init()
-        sheet.onCancel = { [weak self] in self?.done() }
+        sheet.onCancel = { [weak self] in self?.cancelOrClose() }
         buildUI()
     }
 
@@ -53,28 +62,44 @@ final class SettingsSheet: NSObject {
         statusLabel.font = mono(12, .semibold)
         previewLabel.font = mono(13, .medium)
 
-        let mapping = NSTextField(wrappingLabelWithString: """
-        LEFT STICK     steer  ·  pitch (up = dive)
-        A  /  RT       fire
-        LB  /  RB      throttle −  /  +
-        MENU           pause  ·  start / restart
+        let fixed = NSTextField(wrappingLabelWithString: "LEFT STICK     steer · pitch (up = dive)")
+        fixed.font = mono(11)
+        fixed.textColor = .secondaryLabelColor
 
-        Keyboard always works too.
-        """)
-        mapping.font = mono(11)
-        mapping.textColor = .secondaryLabelColor
+        let bindHdr = NSTextField(labelWithString: "REBIND — click an action, then press a button")
+        bindHdr.font = mono(11, .bold)
+        bindHdr.textColor = .secondaryLabelColor
 
-        let fireStart = NSButton(checkboxWithTitle: "Fire button starts / restarts",
+        // One row per rebindable action.
+        var rows: [NSView] = []
+        for (i, action) in PadAction.allCases.enumerated() {
+            let label = NSTextField(labelWithString: action.title)
+            label.font = mono(12)
+            label.widthAnchor.constraint(equalToConstant: 150).isActive = true
+
+            let btn = NSButton(title: gamepad.binding(for: action), target: self, action: #selector(beginCapture(_:)))
+            btn.bezelStyle = .rounded
+            btn.font = mono(12, .semibold)
+            btn.tag = i
+            btn.widthAnchor.constraint(equalToConstant: 150).isActive = true
+            bindButtons.append(btn)
+
+            let row = NSStackView(views: [label, btn])
+            row.orientation = .horizontal
+            row.spacing = 12
+            rows.append(row)
+        }
+
+        let reset = NSButton(title: "Reset to defaults", target: self, action: #selector(resetBindings))
+        reset.bezelStyle = .rounded
+        reset.font = mono(11)
+
+        let fireStart = NSButton(checkboxWithTitle: "Fire button also starts / restarts",
                                  target: self, action: #selector(fireToggled(_:)))
         fireStart.font = mono(12)
         fireStart.state = gamepad.fireConfirms ? .on : .off
 
-        let leftWarp = NSButton(checkboxWithTitle: "Left trigger warps",
-                                target: self, action: #selector(leftWarpToggled(_:)))
-        leftWarp.font = mono(12)
-        leftWarp.state = gamepad.leftWarp ? .on : .off
-
-        let hint = NSTextField(labelWithString: "Pitch invert & deadzone are in Settings (⌘,).")
+        let hint = NSTextField(labelWithString: "Pitch invert & deadzone are in Settings (⌘,).  Keyboard always works.")
         hint.font = mono(10)
         hint.textColor = .tertiaryLabelColor
 
@@ -82,12 +107,14 @@ final class SettingsSheet: NSObject {
         done.keyEquivalent = "\r"
         done.bezelStyle = .rounded
 
-        let stack = NSStackView(views: [title, statusLabel, previewLabel,
-                                        separator(), mapping, separator(),
-                                        fireStart, leftWarp, hint, separator(), done])
+        var views: [NSView] = [title, statusLabel, previewLabel, separator(), fixed, bindHdr]
+        views.append(contentsOf: rows)
+        views.append(contentsOf: [reset, separator(), fireStart, hint, separator(), done])
+
+        let stack = NSStackView(views: views)
         stack.orientation = .vertical
         stack.alignment = .leading
-        stack.spacing = 12
+        stack.spacing = 10
         stack.translatesAutoresizingMaskIntoConstraints = false
 
         let content = NSView()
@@ -105,7 +132,7 @@ final class SettingsSheet: NSObject {
         let b = NSBox()
         b.boxType = .separator
         b.translatesAutoresizingMaskIntoConstraints = false
-        b.widthAnchor.constraint(equalToConstant: 392).isActive = true
+        b.widthAnchor.constraint(equalToConstant: 412).isActive = true
         return b
     }
 
@@ -117,18 +144,56 @@ final class SettingsSheet: NSObject {
             statusLabel.stringValue = "No controller detected — keyboard active"
             statusLabel.textColor = .systemOrange
         }
+
+        // Capture loop: arm once everything is released, then bind the next press.
+        if let action = captureAction {
+            if !captureArmed {
+                if gamepad.capturedControl() == nil { captureArmed = true }
+            } else if let control = gamepad.capturedControl() {
+                gamepad.setBinding(control, for: action)
+                captureAction = nil
+                refreshBindTitles()
+            }
+        }
+
         var parts: [String] = []
         if gamepad.stickX < -0.3 { parts.append("◀") } else if gamepad.stickX > 0.3 { parts.append("▶") }
         if gamepad.stickY > 0.3 { parts.append("▲") } else if gamepad.stickY < -0.3 { parts.append("▼") }
         if gamepad.firing { parts.append("FIRE") }
         if gamepad.throttleUp { parts.append("THR+") }
         if gamepad.throttleDown { parts.append("THR−") }
-        if gamepad.menu { parts.append("MENU") }
+        if gamepad.menu { parts.append("START") }
+        if gamepad.warpHeld { parts.append("WARP") }
         previewLabel.stringValue = "INPUT:  " + (parts.isEmpty ? "—" : parts.joined(separator: "  "))
         previewLabel.textColor = parts.isEmpty ? .tertiaryLabelColor : .labelColor
     }
 
+    private func refreshBindTitles() {
+        for (i, action) in PadAction.allCases.enumerated() {
+            bindButtons[i].title = (captureAction == action) ? "PRESS…" : gamepad.binding(for: action)
+        }
+    }
+
+    @objc private func beginCapture(_ sender: NSButton) {
+        guard sender.tag >= 0 && sender.tag < PadAction.allCases.count else { return }
+        captureAction = PadAction.allCases[sender.tag]
+        captureArmed = false
+        refreshBindTitles()
+    }
+
+    @objc private func resetBindings() {
+        captureAction = nil
+        gamepad.resetBindings()
+        refreshBindTitles()
+    }
+
     @objc private func fireToggled(_ s: NSButton) { gamepad.fireConfirms = (s.state == .on) }
-    @objc private func leftWarpToggled(_ s: NSButton) { gamepad.leftWarp = (s.state == .on) }
+
+    /// Esc cancels an in-progress capture; otherwise it closes the sheet.
+    private func cancelOrClose() {
+        if captureAction != nil { captureAction = nil; refreshBindTitles() }
+        else { done() }
+    }
+
     @objc private func done() { if let p = parent { p.endSheet(sheet) } }
 }

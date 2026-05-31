@@ -79,12 +79,14 @@ Deferred items, not yet scheduled. Pick from here when ready.
       static/squelch/roger-bleep comms FX).
 
 ## Input
-- [ ] **Gamepad support + configure sheet.** Detect a paired controller (Xbox/
-      DualShock) via GameController.framework (`GCController`, controller
-      connect/disconnect notifications); map stick = bank/pitch, triggers/face
-      = fire & throttle, buttons = pause/start. Add a settings sheet to show
-      the detected controller and let the player rebind. Keyboard stays as a
-      fallback.
+- [x] **Gamepad support + configure sheet.** Done. Detection + live preview
+      already existed; added **rebinding**: `PadAction` (fire / throttle ± /
+      pause / warp) each map to a controller button/trigger, edited in the
+      controller sheet (click an action → press a button to bind), reset to
+      defaults, and persisted via `GameSettings.padBindings`. The left stick is
+      fixed (steer/pitch). Warp is now its own bindable action (default LT), so
+      the old "left trigger warps" toggle was retired. Keyboard stays a
+      fallback. (Stick-axis remap / per-controller profiles still future work.)
 
 ## Front-end / narrative screens
 - [ ] **Back-story screen** — a briefing/intro that sets the premise (our

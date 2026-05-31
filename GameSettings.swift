@@ -20,6 +20,7 @@ final class GameSettings {
         static let deadzone    = "deadzone"
         static let fireConfirms = "fireConfirms"
         static let leftWarp    = "leftWarp"
+        static let padBindings = "padBindings"
     }
 
     private init() {
@@ -44,4 +45,11 @@ final class GameSettings {
     var deadzone: Float    { get { d.float(forKey: Key.deadzone) }    set { d.set(newValue, forKey: Key.deadzone) } }
     var fireConfirms: Bool { get { d.bool(forKey: Key.fireConfirms) } set { d.set(newValue, forKey: Key.fireConfirms) } }
     var leftWarp: Bool     { get { d.bool(forKey: Key.leftWarp) }     set { d.set(newValue, forKey: Key.leftWarp) } }
+
+    // Controller button rebinds: [PadAction.rawValue: control name]. Empty until
+    // the player changes something; Gamepad falls back to per-action defaults.
+    var padBindings: [String: String] {
+        get { d.dictionary(forKey: Key.padBindings) as? [String: String] ?? [:] }
+        set { d.set(newValue, forKey: Key.padBindings) }
+    }
 }
