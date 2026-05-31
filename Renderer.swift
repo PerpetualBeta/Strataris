@@ -644,11 +644,15 @@ final class Renderer: NSObject, MTKViewDelegate {
             if hits > 0 { audio.shieldHit() }
 
             // Voice callouts (edge-triggered, rate-limited).
+            // Warning states spread across the bar so "low → critical → down"
+            // don't pile up in the final few hits: low at half shields, critical
+            // at a fifth, then destroyed at zero. Re-arm with hysteresis above
+            // each trigger so they don't chatter while hovering at a threshold.
             let sf = shield / maxShield
-            if sf <= 0.05 && voiceCritArmed { comms.say("Shields critical"); voiceCritArmed = false }
-            else if sf <= 0.20 && voiceLowArmed { comms.say("Shields low"); voiceLowArmed = false }
-            if sf > 0.30 { voiceLowArmed = true }
-            if sf > 0.15 { voiceCritArmed = true }
+            if sf <= 0.25 && voiceCritArmed { comms.say("Shields critical"); voiceCritArmed = false }
+            else if sf <= 0.50 && voiceLowArmed { comms.say("Shields low"); voiceLowArmed = false }
+            if sf > 0.60 { voiceLowArmed = true }
+            if sf > 0.35 { voiceCritArmed = true }
 
             attackCalloutTimer = max(0, attackCalloutTimer - dt)
             let curHP = structures.structures.reduce(0) { $0 + max(0, $1.health) }
