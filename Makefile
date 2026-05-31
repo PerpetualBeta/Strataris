@@ -50,6 +50,7 @@ SWIFT_SOURCES    := main.swift \
                     OptionsSheet.swift
 
 PACKAGE_TYPE     := zip
+ALSO_SHIP_PKG    := true
 EMBEDDED_FRAMEWORKS := Sparkle
 # Hardened runtime must allow loading the embedded Sparkle framework + its
 # helper apps (same convention as SpaceMan / HawkEye / CopyLens).
