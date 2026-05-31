@@ -40,7 +40,9 @@ open .build/Strataris.app   # fly
 ```
 
 Controls: **←/→** steer · **↑/↓** climb/dive · **+ / −** throttle ·
-**Space** fire (stubbed) · **Esc** quit.
+**Space** fire · **P** pause · **M** mute · **B** briefing · **V** enemy intel ·
+**Esc** back (close briefing/codex) · **C** controller setup · **⌘,** settings ·
+**⌘Q** quit.
 
 Headless smoke test (no window/GPU — exercises terrain gen + raycaster,
 prints timing):

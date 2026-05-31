@@ -44,7 +44,9 @@ SWIFT_SOURCES    := main.swift \
                     AudioEngine.swift \
                     VoiceComms.swift \
                     Gamepad.swift \
-                    SettingsSheet.swift
+                    GameSettings.swift \
+                    SettingsSheet.swift \
+                    OptionsSheet.swift
 
 PACKAGE_TYPE     := zip
 

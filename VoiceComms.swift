@@ -15,7 +15,9 @@ final class VoiceComms {
     init(audio: AudioEngine) { self.audio = audio }
 
     func say(_ text: String) {
-        guard let audio = audio, !audio.muted else { return }
+        // Skip entirely when muted or the voice channel is turned down to zero
+        // — no squelch, no bleep, no speech.
+        guard let audio = audio, !audio.muted, audio.voiceGain > 0.001 else { return }
         audio.squelchIn()
 
         let u = AVSpeechUtterance(string: text)

@@ -19,6 +19,13 @@ final class AudioEngine {
     private let sr: Float = 44_100
     var muted = false
 
+    // Per-category gains (0...1), set from the options screen and persisted via
+    // GameSettings. Read on the audio thread without a lock — Float load/store
+    // is effectively atomic here and a stale sample is inaudible.
+    var musicGain: Float = 1
+    var sfxGain: Float = 1
+    var voiceGain: Float = 1
+
     private struct Voice {
         var active = false
         var sustained = false      // engine hum: ignores duration
@@ -31,6 +38,7 @@ final class AudioEngine {
         var delay = 0              // silent lead-in (lets us sequence jingles)
         var amp: Float = 0
         var wave = 0
+        var music = false          // true → scaled by musicGain, else sfxGain
         var rng: UInt32 = 0x1234_5678
         var lp: Float = 0          // low-pass state (for the rocket rumble)
     }
@@ -52,6 +60,11 @@ final class AudioEngine {
     }()
 
     init() {
+        let s = GameSettings.shared
+        musicGain = s.musicVolume
+        sfxGain = s.sfxVolume
+        voiceGain = s.voiceVolume
+
         let fmt = AVAudioFormat(standardFormatWithSampleRate: Double(sr), channels: 1)!
         srcNode = AVAudioSourceNode { [weak self] _, _, frameCount, abl in
             guard let self = self else { return noErr }
@@ -88,7 +101,7 @@ final class AudioEngine {
                         ? Float(elapsed) / Float(max(1, voice.attack))
                         : Float(voice.samplesLeft) / Float(max(1, voice.total - voice.attack))
                 }
-                out[i] += osc(&voice) * voice.amp * env
+                out[i] += osc(&voice) * voice.amp * env * (voice.music ? musicGain : sfxGain)
                 voice.phase += voice.freq / sr
                 if voice.phase >= 1 { voice.phase -= 1 }
                 voice.freq *= voice.slide
@@ -113,7 +126,7 @@ final class AudioEngine {
                 let r = Float((vRng >> 9) & 0xFFFF) / 65535
                 if r < 0.02 { band *= 0.45 }         // brief dropout
                 band += (r - 0.5) * 0.04             // light static speckle
-                out[i] += band
+                out[i] += band * voiceGain
                 voicePos += step
             }
         }
@@ -146,7 +159,7 @@ final class AudioEngine {
     // MARK: Triggering (game thread)
 
     func trigger(wave: Int, f0: Float, f1: Float, dur: Float, amp: Float,
-                 attack: Float = 0.003, delay: Float = 0) {
+                 attack: Float = 0.003, delay: Float = 0, music: Bool = false) {
         let total = max(1, Int(dur * sr))
         let slide = (f0 > 0 && f1 > 0) ? powf(f1 / f0, 1 / Float(total)) : 1
         os_unfair_lock_lock(lock)
@@ -158,7 +171,7 @@ final class AudioEngine {
         if idx >= 0 {
             voices[idx] = Voice(active: true, sustained: false, phase: 0, freq: f0, slide: slide,
                                 samplesLeft: total, total: total, attack: Int(attack * sr),
-                                delay: Int(delay * sr), amp: amp, wave: wave,
+                                delay: Int(delay * sr), amp: amp, wave: wave, music: music,
                                 rng: UInt32(truncatingIfNeeded: 0x9E37 &+ idx &* 2654435))
         }
         os_unfair_lock_unlock(lock)

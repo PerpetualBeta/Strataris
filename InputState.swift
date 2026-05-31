@@ -17,6 +17,7 @@ final class InputState {
         var warp = false       // advance on the PLANET CLEARED screen (kept separate from fire)
         var briefing = false   // open/close the mission-briefing screen from the title
         var codex = false      // open/close the enemy-craft codex from the title
+        var back = false       // Esc — close/return (backs out of briefing/codex to title)
     }
 
     var kb = Controls()      // keyboard source (view writes)
@@ -36,6 +37,7 @@ final class InputState {
     var warp: Bool      { kb.warp      || gp.warp }
     var briefing: Bool  { kb.briefing  || gp.briefing }
     var codex: Bool     { kb.codex     || gp.codex }
+    var back: Bool      { kb.back      || gp.back }
 
     // High-score name entry (keyboard only).
     var nameEntryActive = false

@@ -90,7 +90,9 @@ final class GameView: MTKView {
                 SettingsSheet.present(over: win, gamepad: gamepad)
             }
         case kVK_Escape:
-            if down { NSApp.terminate(nil) }
+            // Esc backs out (closes the briefing/codex screens → title). It no
+            // longer quits — that's ⌘Q, the macOS standard, via the menu.
+            input.kb.back = down
         default:
             return false
         }

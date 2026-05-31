@@ -9,7 +9,7 @@ import Cocoa
 final class SettingsSheet: NSObject {
     private static var current: SettingsSheet?
 
-    private let sheet: NSWindow
+    private let sheet: SheetWindow
     private let gamepad: Gamepad
     private weak var parent: NSWindow?
     private var timer: Timer?
@@ -35,9 +35,10 @@ final class SettingsSheet: NSObject {
     private init(gamepad: Gamepad, parent: NSWindow) {
         self.gamepad = gamepad
         self.parent = parent
-        sheet = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 440, height: 380),
-                         styleMask: [.titled], backing: .buffered, defer: false)
+        sheet = SheetWindow(contentRect: NSRect(x: 0, y: 0, width: 440, height: 340),
+                            styleMask: [.titled], backing: .buffered, defer: false)
         super.init()
+        sheet.onCancel = { [weak self] in self?.done() }
         buildUI()
     }
 
@@ -63,11 +64,6 @@ final class SettingsSheet: NSObject {
         mapping.font = mono(11)
         mapping.textColor = .secondaryLabelColor
 
-        let invert = NSButton(checkboxWithTitle: "Invert pitch (up = climb)",
-                              target: self, action: #selector(invertToggled(_:)))
-        invert.font = mono(12)
-        invert.state = gamepad.invertPitch ? .on : .off
-
         let fireStart = NSButton(checkboxWithTitle: "Fire button starts / restarts",
                                  target: self, action: #selector(fireToggled(_:)))
         fireStart.font = mono(12)
@@ -78,15 +74,9 @@ final class SettingsSheet: NSObject {
         leftWarp.font = mono(12)
         leftWarp.state = gamepad.leftWarp ? .on : .off
 
-        let dzLabel = NSTextField(labelWithString: "Stick deadzone")
-        dzLabel.font = mono(12)
-        let dz = NSSlider(value: Double(gamepad.deadzone), minValue: 0.05, maxValue: 0.5,
-                          target: self, action: #selector(deadzoneChanged(_:)))
-        dz.controlSize = .small
-        dz.widthAnchor.constraint(equalToConstant: 160).isActive = true
-        let dzRow = NSStackView(views: [dzLabel, dz])
-        dzRow.orientation = .horizontal
-        dzRow.spacing = 12
+        let hint = NSTextField(labelWithString: "Pitch invert & deadzone are in Settings (⌘,).")
+        hint.font = mono(10)
+        hint.textColor = .tertiaryLabelColor
 
         let done = NSButton(title: "Done", target: self, action: #selector(done))
         done.keyEquivalent = "\r"
@@ -94,7 +84,7 @@ final class SettingsSheet: NSObject {
 
         let stack = NSStackView(views: [title, statusLabel, previewLabel,
                                         separator(), mapping, separator(),
-                                        invert, fireStart, leftWarp, dzRow, separator(), done])
+                                        fireStart, leftWarp, hint, separator(), done])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 12
@@ -138,9 +128,7 @@ final class SettingsSheet: NSObject {
         previewLabel.textColor = parts.isEmpty ? .tertiaryLabelColor : .labelColor
     }
 
-    @objc private func invertToggled(_ s: NSButton) { gamepad.invertPitch = (s.state == .on) }
     @objc private func fireToggled(_ s: NSButton) { gamepad.fireConfirms = (s.state == .on) }
     @objc private func leftWarpToggled(_ s: NSButton) { gamepad.leftWarp = (s.state == .on) }
-    @objc private func deadzoneChanged(_ s: NSSlider) { gamepad.deadzone = Float(s.doubleValue) }
     @objc private func done() { if let p = parent { p.endSheet(sheet) } }
 }

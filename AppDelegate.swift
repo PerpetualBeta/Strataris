@@ -11,6 +11,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var window: NSWindow!
     private var view: GameView!
     private var renderer: Renderer!
+    private var gamepad: Gamepad!
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         installMainMenu()
@@ -43,7 +44,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         let input = InputState()
-        let gamepad = Gamepad()
+        gamepad = Gamepad()
         view = GameView(frame: NSRect(origin: .zero, size: size), device: device, input: input, gamepad: gamepad)
         renderer = Renderer(device: device, view: view, input: input, gamepad: gamepad)
         view.delegate = renderer
@@ -76,6 +77,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let about = NSMenuItem(title: "About Strataris", action: #selector(showAbout), keyEquivalent: "")
         about.target = self
         appMenu.addItem(about)
+
+        appMenu.addItem(.separator())
+
+        let settings = NSMenuItem(title: "Settings…", action: #selector(openOptions), keyEquivalent: ",")
+        settings.target = self
+        appMenu.addItem(settings)
+        let controller = NSMenuItem(title: "Controller…", action: #selector(openController), keyEquivalent: "")
+        controller.target = self
+        appMenu.addItem(controller)
 
         appMenu.addItem(.separator())
 
@@ -113,6 +123,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Standard macOS About panel, populated with the app icon, version, and a
     /// Jorvik credit / tagline. Native and dependency-free (no SwiftUI), in
     /// keeping with the game's tiny, all-procedural footprint.
+    @objc func openOptions() {
+        guard let win = window else { return }
+        OptionsSheet.present(over: win, audio: renderer.audio, gamepad: gamepad, highScores: renderer.highScores)
+    }
+
+    @objc func openController() {
+        guard let win = window, !gamepad.configuring else { return }
+        SettingsSheet.present(over: win, gamepad: gamepad)
+    }
+
     @objc func showAbout() {
         let credits = NSMutableAttributedString()
         let centre = NSMutableParagraphStyle()

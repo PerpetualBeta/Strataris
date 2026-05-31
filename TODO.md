@@ -47,13 +47,15 @@ Deferred items, not yet scheduled. Pick from here when ready.
       richer link styling/behaviour, this is the point where reusing the
       suite's `JorvikAboutView` could be reconsidered — see the footprint
       trade-off noted when the panel was first built.)
-- [ ] **Settings… menu item** — add to the app menu once the options screen
-      below exists (key equivalent ⌘,).
-- [ ] **Game options screen** — toggles/sliders for Music volume, SFX volume,
-      Voice on/off, (and likely invert-pitch/deadzone moved here from the
-      controller sheet, plus difficulty later). Persist to UserDefaults.
-      Include a **Reset High Scores** button (clears highscores.json, with a
-      confirm).
+- [x] **Settings… menu item** — done (⌘,), plus a Controller… item that opens
+      the controller sheet from the menu as well as the C key.
+- [x] **Game options screen** — done. Native AppKit sheet (`OptionsSheet`,
+      ⌘,): Audio (Music / SFX / Voice volume sliders, live + persisted),
+      Controls (invert pitch + deadzone, moved here from the controller sheet),
+      Data (**Reset High Scores** with a confirm alert). Backed by a new
+      `GameSettings` UserDefaults store; AudioEngine gained per-category gains
+      (music voices tagged) and Gamepad now persists its prefs. Esc closes the
+      sheet. (Difficulty slider still future work.)
 
 ## Distribution / release
 - [ ] **Sparkle auto-updater.** Embed `Sparkle.framework` (the Makefile already

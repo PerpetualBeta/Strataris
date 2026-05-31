@@ -61,6 +61,12 @@ final class HighScores {
         return entries.firstIndex { $0.name == trimmed && $0.score == score && $0.level == level } ?? -1
     }
 
+    /// Wipe the table and remove the saved file (Reset High Scores).
+    func clear() {
+        entries.removeAll()
+        try? FileManager.default.removeItem(at: url)
+    }
+
     private func load() {
         guard let data = try? Data(contentsOf: url),
               let decoded = try? JSONDecoder().decode([HighScoreEntry].self, from: data) else { return }

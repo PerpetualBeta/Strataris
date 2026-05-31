@@ -9,11 +9,15 @@ import GameController
 final class Gamepad {
     private(set) var connected = false
     private(set) var name = "—"
-    var invertPitch = false
-    var deadzone: Float = 0.25
-    var fireConfirms = true        // fire button also starts / restarts on menus
-    var leftWarp = true            // left trigger warps on the PLANET CLEARED screen
-    var configuring = false        // true while the settings sheet is open (pauses the game)
+    // Player preferences — persisted via GameSettings so they survive launches.
+    // invert/deadzone are edited in the options sheet; fire/warp in the controller
+    // sheet. didSet doesn't fire for the initial value, so reading from settings
+    // here doesn't redundantly write back.
+    var invertPitch = GameSettings.shared.invertPitch  { didSet { GameSettings.shared.invertPitch = invertPitch } }
+    var deadzone: Float = GameSettings.shared.deadzone  { didSet { GameSettings.shared.deadzone = deadzone } }
+    var fireConfirms = GameSettings.shared.fireConfirms { didSet { GameSettings.shared.fireConfirms = fireConfirms } }
+    var leftWarp = GameSettings.shared.leftWarp         { didSet { GameSettings.shared.leftWarp = leftWarp } }
+    var configuring = false        // true while a settings sheet is open (pauses the game)
 
     // Live state for the settings sheet's input preview.
     private(set) var stickX: Float = 0, stickY: Float = 0

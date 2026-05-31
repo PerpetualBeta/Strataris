@@ -93,11 +93,11 @@ final class Renderer: NSObject, MTKViewDelegate {
     private var damageFlash: Float = 0
     private var loseReason = "BASES LOST"
 
-    private let highScores = HighScores()
+    let highScores = HighScores()
     private var awaitingName = false               // entering initials after a qualifying run
     private var newScoreRank = -1                  // index of the just-added entry (for highlight)
 
-    private let audio = AudioEngine()
+    let audio = AudioEngine()
     private lazy var comms = VoiceComms(audio: audio)
     private let gamepad: Gamepad
     private var muteLatch = false
@@ -249,26 +249,26 @@ final class Renderer: NSObject, MTKViewDelegate {
 
         // Timpani — heavy and low; double-time through the climax for drive.
         if (climax && s % 2 == 0) || (!climax && s % 4 == 0) {
-            audio.trigger(wave: AudioEngine.noise, f0: 1, f1: 1, dur: 0.22, amp: 0.20)
-            audio.trigger(wave: AudioEngine.sine, f0: 56, f1: 26, dur: 0.28, amp: 0.24)
+            audio.trigger(wave: AudioEngine.noise, f0: 1, f1: 1, dur: 0.22, amp: 0.20, music: true)
+            audio.trigger(wave: AudioEngine.sine, f0: 56, f1: 26, dur: 0.28, amp: 0.24, music: true)
         }
         // Deep bass root + minor chord per bar (Dm – Bb – Gm – A, twice).
         if s % 8 == 0 {
             let roots = [38, 34, 31, 33, 38, 34, 31, 33]                  // D2 Bb1 G1 A1 ×2
             audio.trigger(wave: AudioEngine.saw, f0: Renderer.midi(roots[bar]),
-                          f1: Renderer.midi(roots[bar]), dur: 1.5, amp: 0.14, attack: 0.03)
+                          f1: Renderer.midi(roots[bar]), dur: 1.5, amp: 0.14, attack: 0.03, music: true)
             let dm: [Int] = [50, 53, 57], bb = [46, 50, 53], gm = [43, 46, 50], a = [45, 49, 52]
             let chords = [dm, bb, gm, a, dm, bb, gm, a]
             for n in chords[bar] {
                 audio.trigger(wave: AudioEngine.triangle, f0: Renderer.midi(n), f1: Renderer.midi(n),
-                              dur: 1.6, amp: 0.05, attack: 0.06)
+                              dur: 1.6, amp: 0.05, attack: 0.06, music: true)
             }
             // Dissonant high cluster swells in during the climax (dread/tension).
             if climax {
                 audio.trigger(wave: AudioEngine.triangle, f0: Renderer.midi(81), f1: Renderer.midi(81),
-                              dur: 1.6, amp: 0.035, attack: 0.2)
+                              dur: 1.6, amp: 0.035, attack: 0.2, music: true)
                 audio.trigger(wave: AudioEngine.triangle, f0: Renderer.midi(82), f1: Renderer.midi(82),
-                              dur: 1.6, amp: 0.030, attack: 0.2)   // semitone clash
+                              dur: 1.6, amp: 0.030, attack: 0.2, music: true)   // semitone clash
             }
         }
         // Melody: intro (rest) → A theme → chromatic bridge → B climax (8va).
@@ -284,10 +284,10 @@ final class Renderer: NSObject, MTKViewDelegate {
         let m = mel[s]
         if m > 0 {
             let f = Renderer.midi(m)
-            audio.trigger(wave: AudioEngine.saw, f0: f, f1: f, dur: 0.30, amp: 0.16, attack: 0.02)
-            audio.trigger(wave: AudioEngine.saw, f0: f * 0.5, f1: f * 0.5, dur: 0.32, amp: 0.12, attack: 0.03)
+            audio.trigger(wave: AudioEngine.saw, f0: f, f1: f, dur: 0.30, amp: 0.16, attack: 0.02, music: true)
+            audio.trigger(wave: AudioEngine.saw, f0: f * 0.5, f1: f * 0.5, dur: 0.32, amp: 0.12, attack: 0.03, music: true)
             if climax {   // add a brighter octave on top for power
-                audio.trigger(wave: AudioEngine.saw, f0: f * 2, f1: f * 2, dur: 0.26, amp: 0.06, attack: 0.02)
+                audio.trigger(wave: AudioEngine.saw, f0: f * 2, f1: f * 2, dur: 0.26, amp: 0.06, attack: 0.02, music: true)
             }
         }
     }
@@ -534,12 +534,12 @@ final class Renderer: NSObject, MTKViewDelegate {
                 state = .playing
             }
             if !input.restart { restartLatch = false }
-            if input.briefing && !briefingLatch {
+            if (input.briefing || input.back) && !briefingLatch {
                 briefingLatch = true
                 audio.uiStart()
                 state = .title
             }
-            if !input.briefing { briefingLatch = false }
+            if !input.briefing && !input.back { briefingLatch = false }
 
             titleVoxel.render(camera: titleCam)
             titleVoxel.drawBriefing(time: briefingTime)
@@ -570,12 +570,12 @@ final class Renderer: NSObject, MTKViewDelegate {
                 state = .playing
             }
             if !input.restart { restartLatch = false }
-            if input.codex && !codexLatch {
+            if (input.codex || input.back) && !codexLatch {
                 codexLatch = true
                 audio.uiStart()
                 state = .title
             }
-            if !input.codex { codexLatch = false }
+            if !input.codex && !input.back { codexLatch = false }
 
             titleVoxel.render(camera: titleCam)
             titleVoxel.drawCodex(time: codexTime)
