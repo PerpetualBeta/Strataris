@@ -207,6 +207,29 @@ private struct EntityUniforms {
     var fog: SIMD4<Float>          // x = near, y = far
 }
 
+private struct BillboardVertex {
+    var center: SIMD3<Float>       // center @0, (cornerX, cornerY, size) @16, colour @32 — stride 48
+    var cs: SIMD4<Float>
+    var color: SIMD4<Float>
+}
+
+private struct BillboardUniforms {
+    var vp: simd_float4x4
+    var camRight: SIMD4<Float>     // camera basis, for facing the quad at the camera
+    var camUp: SIMD4<Float>
+    var eye: SIMD4<Float>
+    var fog: SIMD4<Float>
+}
+
+/// A camera-facing effect quad (explosion / smoke / bolt). `additive` brightens
+/// (fire, tracers); otherwise it's alpha-blended (smoke).
+struct Billboard {
+    var center: SIMD3<Float>
+    var size: Float
+    var color: SIMD4<Float>
+    var additive: Bool
+}
+
 // MARK: - Mesh-terrain renderer
 
 final class MeshTerrainRenderer {
@@ -215,9 +238,15 @@ final class MeshTerrainRenderer {
     private let meshPipeline: MTLRenderPipelineState
     private let skyPipeline: MTLRenderPipelineState
     private let entityPipeline: MTLRenderPipelineState
+    private let bbAddPipeline: MTLRenderPipelineState  // additive billboards (fire/bolts)
+    private let bbAlphaPipeline: MTLRenderPipelineState // alpha billboards (smoke)
     private let meshDepth: MTLDepthStencilState        // less + write
     private let skyDepth: MTLDepthStencilState         // always + no write
+    private let fxDepth: MTLDepthStencilState          // less + NO write (occluded, but don't occlude)
     private var entityBuffers: [EnemyKind: (buf: MTLBuffer, count: Int)] = [:]
+    private var fxBufs: [MTLBuffer]                    // pooled per-frame billboard verts
+    private var fxBufIndex = 0
+    private let fxCapacityVerts = 4096                 // ~680 billboards/frame
 
     let width: Int, height: Int
     let colorTex: MTLTexture
@@ -291,6 +320,27 @@ final class MeshTerrainRenderer {
     }
     fragment float4 f_entity(EVOut in [[stage_in]]) {
         return float4(in.shaded, 1.0 - in.fogT);
+    }
+
+    // Camera-facing billboard (effects): the quad corner is offset along the
+    // camera's right/up axes, so it always faces the viewer. Soft round falloff.
+    struct BBU { float4x4 vp; float4 camRight; float4 camUp; float4 eye; float4 fog; };
+    struct BVIn  { float3 center [[attribute(0)]]; float4 cs [[attribute(1)]]; float4 col [[attribute(2)]]; };
+    struct BVOut { float4 position [[position]]; float4 color; float2 uv; float fogT; };
+
+    vertex BVOut v_bb(BVIn in [[stage_in]], constant BBU& u [[buffer(1)]]) {
+        float3 wp = in.center + u.camRight.xyz * (in.cs.x * in.cs.z) + u.camUp.xyz * (in.cs.y * in.cs.z);
+        BVOut o;
+        o.position = u.vp * float4(wp, 1.0);
+        o.color = in.col;
+        o.uv = in.cs.xy;
+        float dist = distance(in.center, u.eye.xyz);
+        o.fogT = clamp((dist - u.fog.x) / max(1.0, u.fog.y - u.fog.x), 0.0, 1.0);
+        return o;
+    }
+    fragment float4 f_bb(BVOut in [[stage_in]]) {
+        float a = in.color.a * (1.0 - in.fogT) * clamp(1.0 - length(in.uv), 0.0, 1.0);  // soft disc
+        return float4(in.color.rgb, a);
     }
 
     // Full-screen sky: reconstruct the world-space view ray per pixel from the
@@ -390,6 +440,31 @@ final class MeshTerrainRenderer {
             ed.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
             ed.depthAttachmentPixelFormat = .depth32Float
             self.entityPipeline = try device.makeRenderPipelineState(descriptor: ed)
+
+            // Billboard layout: float3 center @0, float4 (corner.xy, size) @16, float4 col @32.
+            let bvd = MTLVertexDescriptor()
+            bvd.attributes[0].format = .float3; bvd.attributes[0].offset = 0;  bvd.attributes[0].bufferIndex = 0
+            bvd.attributes[1].format = .float4; bvd.attributes[1].offset = 16; bvd.attributes[1].bufferIndex = 0
+            bvd.attributes[2].format = .float4; bvd.attributes[2].offset = 32; bvd.attributes[2].bufferIndex = 0
+            bvd.layouts[0].stride = 48
+            func bbPipeline(additive: Bool) throws -> MTLRenderPipelineState {
+                let d = MTLRenderPipelineDescriptor()
+                d.vertexFunction = lib.makeFunction(name: "v_bb")
+                d.fragmentFunction = lib.makeFunction(name: "f_bb")
+                d.vertexDescriptor = bvd
+                d.colorAttachments[0].pixelFormat = .rgba8Unorm
+                d.colorAttachments[0].isBlendingEnabled = true
+                d.colorAttachments[0].rgbBlendOperation = .add
+                d.colorAttachments[0].alphaBlendOperation = .add
+                d.colorAttachments[0].sourceRGBBlendFactor = .sourceAlpha
+                d.colorAttachments[0].destinationRGBBlendFactor = additive ? .one : .oneMinusSourceAlpha
+                d.colorAttachments[0].sourceAlphaBlendFactor = .one
+                d.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
+                d.depthAttachmentPixelFormat = .depth32Float
+                return try device.makeRenderPipelineState(descriptor: d)
+            }
+            self.bbAddPipeline = try bbPipeline(additive: true)
+            self.bbAlphaPipeline = try bbPipeline(additive: false)
         } catch { print("6DOF: pipeline build failed — \(error)"); return nil }
 
         let dsMesh = MTLDepthStencilDescriptor()
@@ -398,6 +473,16 @@ final class MeshTerrainRenderer {
         let dsSky = MTLDepthStencilDescriptor()
         dsSky.depthCompareFunction = .always; dsSky.isDepthWriteEnabled = false
         self.skyDepth = device.makeDepthStencilState(descriptor: dsSky)!
+        let dsFx = MTLDepthStencilDescriptor()
+        dsFx.depthCompareFunction = .less; dsFx.isDepthWriteEnabled = false  // occluded by world, won't occlude
+        self.fxDepth = device.makeDepthStencilState(descriptor: dsFx)!
+        var fxPool = [MTLBuffer]()
+        for _ in 0..<3 {
+            guard let b = device.makeBuffer(length: fxCapacityVerts * MemoryLayout<BillboardVertex>.stride,
+                                            options: .storageModeShared) else { return nil }
+            fxPool.append(b)
+        }
+        self.fxBufs = fxPool
 
         // Offscreen colour (shared so we can read it back headless) + depth.
         let cdesc = MTLTextureDescriptor.texture2DDescriptor(
@@ -560,7 +645,10 @@ final class MeshTerrainRenderer {
     /// Encode one frame into `colorTex`. Returns the command buffer (caller may
     /// add a blit/present and commit, or commit + wait for headless readback).
     /// `entities` are craft to draw (kind + world transform), depth-tested.
-    func encode(camera: Camera6DOF, entities: [(kind: EnemyKind, model: simd_float4x4)] = []) -> MTLCommandBuffer? {
+    /// `fx` are camera-facing effect billboards (depth-tested, blended).
+    func encode(camera: Camera6DOF,
+                entities: [(kind: EnemyKind, model: simd_float4x4)] = [],
+                fx: [Billboard] = []) -> MTLCommandBuffer? {
         let aspect = Float(width) / Float(height)
         let view = camera.viewMatrix()
         let proj = camera.projectionMatrix(aspect: aspect)
@@ -620,13 +708,52 @@ final class MeshTerrainRenderer {
                 enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: eb.count)
             }
         }
+
+        // Effect billboards: additive (fire/bolts) then alpha (smoke); depth-tested
+        // against the world but not writing depth, so they layer and don't occlude.
+        if !fx.isEmpty {
+            let corners: [(Float, Float)] = [(-1, -1), (1, -1), (1, 1), (-1, -1), (1, 1), (-1, 1)]
+            var verts = [BillboardVertex](); verts.reserveCapacity(fx.count * 6)
+            func emit(_ b: Billboard) {
+                for (cx, cy) in corners {
+                    verts.append(BillboardVertex(center: b.center, cs: SIMD4(cx, cy, b.size, 0), color: b.color))
+                }
+            }
+            for b in fx where b.additive { emit(b) }
+            let addCount = verts.count
+            for b in fx where !b.additive { emit(b) }
+            let cap = fxCapacityVerts
+            if verts.count > cap { verts.removeLast(verts.count - cap) }   // safety clamp
+            if !verts.isEmpty {
+                let buf = fxBufs[fxBufIndex]; fxBufIndex = (fxBufIndex + 1) % fxBufs.count
+                verts.withUnsafeBytes { raw in buf.contents().copyMemory(from: raw.baseAddress!, byteCount: raw.count) }
+                var bu = BillboardUniforms(vp: vp,
+                                           camRight: SIMD4<Float>(camera.right, 0),
+                                           camUp: SIMD4<Float>(camera.up, 0),
+                                           eye: SIMD4<Float>(camera.position, 1),
+                                           fog: SIMD4<Float>(worldHalf * 0.45, worldHalf * 0.82, 0, 0))
+                enc.setDepthStencilState(fxDepth)
+                enc.setVertexBuffer(buf, offset: 0, index: 0)
+                enc.setVertexBytes(&bu, length: MemoryLayout<BillboardUniforms>.stride, index: 1)
+                let addN = min(addCount, verts.count)
+                if addN > 0 {
+                    enc.setRenderPipelineState(bbAddPipeline)
+                    enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: addN)
+                }
+                if verts.count > addN {
+                    enc.setRenderPipelineState(bbAlphaPipeline)
+                    enc.drawPrimitives(type: .triangle, vertexStart: addN, vertexCount: verts.count - addN)
+                }
+            }
+        }
         enc.endEncoding()
         return cmd
     }
 
     /// Render one frame and read the colour texture back as RGB bytes (headless).
-    func renderToRGB(camera: Camera6DOF, entities: [(kind: EnemyKind, model: simd_float4x4)] = []) -> [UInt8] {
-        guard let cmd = encode(camera: camera, entities: entities) else { return [] }
+    func renderToRGB(camera: Camera6DOF, entities: [(kind: EnemyKind, model: simd_float4x4)] = [],
+                     fx: [Billboard] = []) -> [UInt8] {
+        guard let cmd = encode(camera: camera, entities: entities, fx: fx) else { return [] }
         cmd.commit(); cmd.waitUntilCompleted()
         var rgba = [UInt8](repeating: 0, count: width * height * 4)
         colorTex.getBytes(&rgba, bytesPerRow: width * 4,
@@ -713,7 +840,15 @@ enum Spike6DOF {
         var ecam = Camera6DOF.start(position: SIMD3(512, 360, egz + 70))
         ecam.rotateBody(pitch: -0.1, yaw: 0, roll: 0)
         r.recenterIfNeeded(around: ecam.position, sync: true)
-        writePPM(r.renderToRGB(camera: ecam, entities: ents), w: w, h: h, path: "/tmp/strataris_6dof_enemies.ppm")
+        // Stand-in effects: an explosion (additive core + glow), smoke (alpha), a bolt.
+        func gz(_ x: Float, _ y: Float, _ up: Float) -> SIMD3<Float> { SIMD3(x, y, terrain.heightF(x, y) + up) }
+        let fxStand: [Billboard] = [
+            Billboard(center: gz(512, 250, 60), size: 12, color: SIMD4(1.0, 0.78, 0.35, 1.0), additive: true),
+            Billboard(center: gz(512, 250, 60), size: 20, color: SIMD4(1.0, 0.42, 0.14, 0.6), additive: true),
+            Billboard(center: gz(540, 280, 52), size: 14, color: SIMD4(0.55, 0.55, 0.60, 0.6), additive: false),
+            Billboard(center: gz(486, 290, 38), size: 5,  color: SIMD4(1.0, 1.0, 0.6, 1.0), additive: true),
+        ]
+        writePPM(r.renderToRGB(camera: ecam, entities: ents, fx: fxStand), w: w, h: h, path: "/tmp/strataris_6dof_enemies.ppm")
 
         // Rough timing (GPU fill is trivial at 480×270; this is a sanity floor).
         let t0 = CACurrentMediaTime()
@@ -808,6 +943,7 @@ final class Spike6DOFController: NSObject, MTKViewDelegate {
     private var lastTime: CFTimeInterval = 0
     private var speed: Float = 120
     private var modeLatch = false
+    private var animTime: Float = 0
 
     init?(device: MTLDevice, view: Spike6DOFView) {
         self.terrain = Terrain(seed: Renderer6DOFSeed)
@@ -832,11 +968,30 @@ final class Spike6DOFController: NSObject, MTKViewDelegate {
 
     func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
 
+    /// Looping stand-in explosions + smoke near the enemy cluster, so the
+    /// billboard path is visible while flying (the spike has no Combat/Smoke).
+    private func standInEffects() -> [Billboard] {
+        func gz(_ x: Float, _ y: Float, _ up: Float) -> SIMD3<Float> { SIMD3(x, y, terrain.heightF(x, y) + up) }
+        var fx = [Billboard]()
+        let spots: [(Float, Float, Float)] = [(512, 460, 0), (470, 360, 0.9), (560, 300, 1.7)]
+        for (x, y, off) in spots {
+            let p = (animTime * 0.6 + off).truncatingRemainder(dividingBy: 1.0)   // 0..1 loop
+            let a = 1 - p
+            let size = 8 + p * 24
+            fx.append(Billboard(center: gz(x, y, 55), size: size, color: SIMD4(1.0, 0.70, 0.28, a), additive: true))
+            fx.append(Billboard(center: gz(x, y, 55), size: size * 1.4, color: SIMD4(1.0, 0.38, 0.12, a * 0.55), additive: true))
+            fx.append(Billboard(center: gz(x + 6, y, 55 + p * 35), size: 12 + p * 16,
+                                color: SIMD4(0.50, 0.50, 0.55, a * 0.5), additive: false))   // smoke
+        }
+        return fx
+    }
+
     func draw(in mtkView: MTKView) {
         let now = CACurrentMediaTime()
         if lastTime == 0 { lastTime = now }
         let dt = Float(min(1.0 / 20.0, max(0.0, now - lastTime)))
         lastTime = now
+        animTime += dt
 
         let k = (view?.keys) ?? SpikeInput()
 
@@ -886,7 +1041,7 @@ final class Spike6DOFController: NSObject, MTKViewDelegate {
         let ents = enemies.enemies.map {
             (kind: $0.kind, model: enemyModel($0, scale: enemies.scale(for: $0.kind)))
         }
-        guard let cmd = renderer.encode(camera: camera, entities: ents) else { return }
+        guard let cmd = renderer.encode(camera: camera, entities: ents, fx: standInEffects()) else { return }
         if let drawable = mtkView.currentDrawable,
            let pass = mtkView.currentRenderPassDescriptor,
            let pipe = blitPipeline,
