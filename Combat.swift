@@ -31,17 +31,20 @@ final class Combat {
 
     var tracerActive: Bool { tracerTimer > 0 }
 
+    /// `lockedTargetIndex`: when the Targeting Computer has a lock, fire is
+    /// directed at that (moving) craft instead of whatever sits under the reticle.
     func update(dt: Float, input: InputState, camera: Camera,
                 field: EnemyField, voxel: VoxelRenderer, smoke: SmokeField,
-                crosshairX: Float, crosshairY: Float) {
+                crosshairX: Float, crosshairY: Float, lockedTargetIndex: Int? = nil) {
         fireCooldown = max(0, fireCooldown - dt)
         tracerTimer = max(0, tracerTimer - dt)
 
         if input.fire && fireCooldown <= 0 {
             fireCooldown = fireInterval
             tracerTimer = 0.07
-            if let idx = voxel.targetedEnemy(in: field, camera: camera,
-                                             crosshairX: crosshairX, crosshairY: crosshairY) {
+            let target = lockedTargetIndex ?? voxel.targetedEnemy(in: field, camera: camera,
+                                                                  crosshairX: crosshairX, crosshairY: crosshairY)
+            if let idx = target {
                 let e = field.enemies[idx]
                 explosions.append(Explosion(x: e.x, y: e.y, z: e.z, age: 0))
                 if let pts = field.hit(at: idx) {   // nil = damaged but not destroyed (mothership)
@@ -55,6 +58,9 @@ final class Combat {
         for i in explosions.indices { explosions[i].age += dt }
         explosions.removeAll { $0.age >= explosionDuration }
     }
+
+    /// Award points not tied to a kill (level-milestone bonuses).
+    func awardBonus(_ pts: Int) { score += pts }
 
     /// Clear lingering effects (used when a planet is cleared).
     func clearTransient() {

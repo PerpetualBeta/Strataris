@@ -79,7 +79,8 @@ final class GameView: MTKView {
             // keyboard-only players can still fire. Gamepad uses its own binding.
             guard FeatureFlags.screenshotOnSpace else { return false }
             input.kb.screenshot = down
-        case kVK_ANSI_X:                    input.kb.pulse = down   // feature flag: radial pulse
+        case kVK_ANSI_X:                    input.kb.pulse = down   // perk: radial pulse (level 12)
+        case kVK_ANSI_Z:                    input.kb.cloak = down   // perk: cloak (level 9)
         case kVK_ANSI_R, kVK_Return, kVK_ANSI_KeypadEnter:
             input.kb.restart = down
             input.kb.warp = down            // keyboard advances both restart and warp screens

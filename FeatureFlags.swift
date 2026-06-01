@@ -3,7 +3,6 @@
 // Off by default; opt in per machine with `defaults write`, e.g.
 //   defaults write cc.jorviksoftware.Strataris ShowFPS            -bool true
 //   defaults write cc.jorviksoftware.Strataris ScreenshotOnSpace  -bool true   (F key)
-//   defaults write cc.jorviksoftware.Strataris RadialPulseWeapon  -bool true
 // Read live each frame, so toggling takes effect on the next launch (or
 // immediately, for flags re-read every frame).
 
@@ -20,9 +19,7 @@ enum FeatureFlags {
     /// still shoot. (Flag name is kept for back-compat with existing installs.)
     static var screenshotOnSpace: Bool { d.bool(forKey: "ScreenshotOnSpace") }
 
-    /// Grants 3 radial-pulse charges (X key) that wipe every remaining enemy.
-    /// Kills from the pulse do NOT score.
-    static var radialPulseWeapon: Bool { d.bool(forKey: "RadialPulseWeapon") }
+    // (The radial-pulse weapon is now a per-run level-12 perk, not a flag.)
 
     /// Force the "May the fourth be with you" callout at every mission start,
     /// regardless of the date (for testing the date-gated Easter egg).

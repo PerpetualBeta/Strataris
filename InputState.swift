@@ -19,7 +19,8 @@ final class InputState {
         var codex = false      // open/close the enemy-craft codex from the title
         var back = false       // Esc — close/return (backs out of briefing/codex to title)
         var screenshot = false // feature flag: F (or gamepad) grabs a screenshot
-        var pulse = false      // feature flag: radial pulse weapon (X)
+        var pulse = false      // perk: radial pulse weapon (X), unlocked at level 12
+        var cloak = false      // perk: cloaking device (Z), unlocked at level 9
     }
 
     var kb = Controls()      // keyboard source (view writes)
@@ -44,6 +45,7 @@ final class InputState {
     // gamepad button (set by Gamepad.poll only while the flag is enabled).
     var screenshot: Bool { kb.screenshot || gp.screenshot }
     var pulse: Bool     { kb.pulse     || gp.pulse }
+    var cloak: Bool     { kb.cloak     || gp.cloak }
 
     // High-score name entry (keyboard only).
     var nameEntryActive = false

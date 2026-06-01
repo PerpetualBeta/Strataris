@@ -390,6 +390,39 @@ final class VoxelRenderer {
         return best
     }
 
+    /// Targeting Computer: the nearest-to-reticle, non-occluded craft whose
+    /// projected centre lies within `zoneRadius` px of the crosshair. Unlike
+    /// `targetedEnemy` (which uses each craft's billboard radius and ranks by
+    /// depth), this uses a fixed screen zone and ranks by 2D screen distance.
+    /// Call BEFORE drawEnemies (depth buffer must hold terrain only).
+    func lockableEnemy(in field: EnemyField, camera: Camera,
+                       crosshairX: Float, crosshairY: Float, zoneRadius: Float) -> Int? {
+        let w = width, h = height
+        var best: Int? = nil
+        var bestD2 = zoneRadius * zoneRadius
+        for (i, e) in field.enemies.enumerated() {
+            guard let p = project(e.x, e.y, e.z, camera: camera) else { continue }
+            let dx = crosshairX - p.x, dy = crosshairY - p.y
+            let d2 = dx * dx + dy * dy
+            if d2 > bestD2 { continue }
+            var px = Int(p.x), py = Int(p.y)
+            if px < 0 { px = 0 } else if px >= w { px = w - 1 }
+            if py < 0 { py = 0 } else if py >= h { py = h - 1 }
+            if p.depth >= depthBuf[py * w + px] { continue }     // occluded by terrain
+            bestD2 = d2; best = i
+        }
+        return best
+    }
+
+    /// Screen-space distance from the reticle to a craft's projected centre,
+    /// or nil if it isn't in view. Used to test whether a lock is still in-zone.
+    func screenDistanceToReticle(ofEnemyAt index: Int, in field: EnemyField, camera: Camera,
+                                 crosshairX: Float, crosshairY: Float) -> Float? {
+        guard let p = screenPosition(ofEnemyAt: index, in: field, camera: camera) else { return nil }
+        let dx = crosshairX - p.x, dy = crosshairY - p.y
+        return sqrtf(dx * dx + dy * dy)
+    }
+
     /// Where a given craft projects on screen (for tests / future HUD/radar).
     func screenPosition(ofEnemyAt index: Int, in field: EnemyField, camera: Camera)
         -> (x: Float, y: Float, depth: Float)? {
@@ -457,6 +490,26 @@ final class VoxelRenderer {
             plot(cx, cy + d, col); plot(cx, cy - d, col)
         }
         plot(cx, cy, col)
+    }
+
+    /// Targeting Computer: dashed box around the locked craft, sized to its
+    /// projected radius (same math as `targetedEnemy`).
+    func drawLockBox(forEnemyAt index: Int, in field: EnemyField, camera: Camera, color: UInt32) {
+        guard field.enemies.indices.contains(index) else { return }
+        let e = field.enemies[index]
+        guard let p = project(e.x, e.y, e.z, camera: camera) else { return }
+        let r = min(field.scale(for: e.kind) * camera.scaleHeight / p.depth, Float(height) * 4) + 5
+        drawDottedBox(cx: p.x, cy: p.y, half: r, color: color)
+    }
+
+    private func drawDottedBox(cx: Float, cy: Float, half: Float, color: UInt32) {
+        let x0 = Int(cx - half), x1 = Int(cx + half)
+        let y0 = Int(cy - half), y1 = Int(cy + half)
+        let dash = 3
+        let cxlo = max(0, x0), cxhi = min(width - 1, x1)
+        if cxlo <= cxhi { for x in cxlo...cxhi where ((x - x0) / dash) % 2 == 0 { plot(x, y0, color); plot(x, y1, color) } }
+        let cylo = max(0, y0), cyhi = min(height - 1, y1)
+        if cylo <= cyhi { for y in cylo...cyhi where ((y - y0) / dash) % 2 == 0 { plot(x0, y, color); plot(x1, y, color) } }
     }
 
     @inline(__always) private func plot(_ px: Int, _ py: Int, _ color: UInt32) {
@@ -743,10 +796,34 @@ final class VoxelRenderer {
                   x: width - Font.width(s) - 4, y: 4, color: packRGBA(120, 255, 160))
     }
 
-    /// Feature flag: remaining radial-pulse charges, top-left corner.
+    /// Perk: remaining radial-pulse charges, top-left corner.
     func drawPulseCharges(_ n: Int) {
         Font.draw("PULSE \(max(0, n))", into: framebuffer, w: width, h: height,
                   x: 4, y: 4, color: n > 0 ? packRGBA(255, 200, 90) : packRGBA(150, 120, 90))
+    }
+
+    /// Perk: cloak status, top-left below the pulse readout. Shows READY,
+    /// the active countdown (bright cyan), or the recharge countdown (dim).
+    func drawCloakStatus(active: Float, cooldown: Float) {
+        let s: String, col: UInt32
+        if active > 0 {
+            s = "CLOAK \(Int(ceil(active)))"; col = packRGBA(120, 240, 255)
+        } else if cooldown > 0 {
+            s = "CLOAK \(Int(ceil(cooldown)))"; col = packRGBA(110, 120, 140)
+        } else {
+            s = "CLOAK READY"; col = packRGBA(120, 255, 200)
+        }
+        Font.draw(s, into: framebuffer, w: width, h: height, x: 4, y: 14, color: col)
+    }
+
+    /// Brief centred banner near the top for perk unlocks / bonuses. `t` is the
+    /// seconds remaining; the text dims over its final second.
+    func drawNotification(_ text: String, t: Float) {
+        let scale = 2
+        let x = (width - Font.width(text, scale: scale)) / 2
+        let k = min(1, max(0, t))
+        let col = packRGBA(UInt8(255 * k), UInt8(225 * k), UInt8(110 * k))
+        Font.draw(text, into: framebuffer, w: width, h: height, x: x, y: height / 6, scale: scale, color: col)
     }
 
     func drawHUD(score: Int, basesStanding: Int, basesTotal: Int,

@@ -14,7 +14,7 @@ import GameController
 /// feature flag is enabled (see `activeCases`). The flight controls are always
 /// present.
 enum PadAction: String, CaseIterable {
-    case fire, throttleUp, throttleDown, pause, warp, pulse, screenshot
+    case fire, throttleUp, throttleDown, pause, warp, cloak, pulse, screenshot
 
     var title: String {
         switch self {
@@ -23,6 +23,7 @@ enum PadAction: String, CaseIterable {
         case .throttleDown: return "THROTTLE -"
         case .pause:        return "PAUSE / START"
         case .warp:         return "WARP"
+        case .cloak:        return "CLOAK"
         case .pulse:        return "RADIAL PULSE"
         case .screenshot:   return "SCREENSHOT"
         }
@@ -36,17 +37,17 @@ enum PadAction: String, CaseIterable {
         case .throttleDown: return "LB"
         case .pause:        return "MENU"
         case .warp:         return "LT"
+        case .cloak:        return "B"
         case .pulse:        return "X"
         case .screenshot:   return "Y"
         }
     }
 
     /// The actions actually shown in the rebind sheet and polled each frame.
-    /// The optional pulse / screenshot actions appear only while their feature
-    /// flag is on, so players never see controls for features they can't use.
+    /// Cloak/pulse are perks (always present — they simply do nothing until the
+    /// player reaches their unlock level). Screenshot stays behind its flag.
     static var activeCases: [PadAction] {
-        var cases: [PadAction] = [.fire, .throttleUp, .throttleDown, .pause, .warp]
-        if FeatureFlags.radialPulseWeapon { cases.append(.pulse) }
+        var cases: [PadAction] = [.fire, .throttleUp, .throttleDown, .pause, .warp, .cloak, .pulse]
         if FeatureFlags.screenshotOnSpace { cases.append(.screenshot) }
         return cases
     }
@@ -69,7 +70,7 @@ final class Gamepad {
     // Live state for the settings sheet's input preview.
     private(set) var stickX: Float = 0, stickY: Float = 0
     private(set) var firing = false, throttleUp = false, throttleDown = false, menu = false, warpHeld = false
-    private(set) var pulseHeld = false, shotHeld = false   // optional, flag-gated
+    private(set) var pulseHeld = false, shotHeld = false, cloakHeld = false
 
     // Bindable controls and how to read each one from a GCExtendedGamepad.
     // Order is the pick list shown when capturing a new binding.
@@ -170,7 +171,7 @@ final class Gamepad {
             name = "—"
             input.gp = .init()
             stickX = 0; stickY = 0; firing = false; throttleUp = false; throttleDown = false
-            menu = false; warpHeld = false; pulseHeld = false; shotHeld = false
+            menu = false; warpHeld = false; pulseHeld = false; shotHeld = false; cloakHeld = false
             return
         }
         connected = true
@@ -185,8 +186,10 @@ final class Gamepad {
         throttleDown = down(.throttleDown, gp)
         menu = down(.pause, gp)
         warpHeld = down(.warp, gp)
-        // Optional, flag-gated actions — only read when their feature is on.
-        pulseHeld = FeatureFlags.radialPulseWeapon && down(.pulse, gp)
+        // Perk actions are always polled (gated by level/charges in the game);
+        // screenshot stays behind its feature flag.
+        pulseHeld = down(.pulse, gp)
+        cloakHeld = down(.cloak, gp)
         shotHeld = FeatureFlags.screenshotOnSpace && down(.screenshot, gp)
 
         var c = InputState.Controls()
@@ -203,6 +206,7 @@ final class Gamepad {
         if fireConfirms && firing { c.restart = true } // fire also starts / restarts (optional)
         if warpHeld { c.warp = true }
         if pulseHeld { c.pulse = true }
+        if cloakHeld { c.cloak = true }
         if shotHeld { c.screenshot = true }
         input.gp = c
     }

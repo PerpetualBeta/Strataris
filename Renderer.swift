@@ -108,9 +108,23 @@ final class Renderer: NSObject, MTKViewDelegate {
     private var fpsSmoothed: Float = 0          // showFPS readout
     private var screenshotPending = false       // screenshotOnSpace request (edge)
     private var screenshotLatch = false
-    private var pulseCharges = FeatureFlags.radialPulseWeapon ? 3 : 0   // radialPulseWeapon, per run
     private var pulseLatch = false
     private var wasPlaying = false              // edge-detect level start (Easter egg)
+
+    // Per-run level-up perks (enabled by default; availability is a pure function
+    // of `level`, so it resets automatically when `level` resets to 1).
+    private var hasTargetingComputer: Bool { level >= 6 }
+    private var hasCloak: Bool { level >= 9 }
+    private var hasRadialPulse: Bool { level >= 12 }
+    private var pulseCharges = 0                // radial pulse: granted at level 12
+    private var targetLockId: Int? = nil        // targeting computer: locked craft (stable id)
+    private var cloakActive: Float = 0          // seconds of cloak remaining (>0 = cloaked)
+    private var cloakCooldown: Float = 0        // seconds until cloak usable again
+    private var cloakLatch = false
+    private let cloakDuration: Float = 10
+    private let cloakRecharge: Float = 60
+    private var perkBanner: String? = nil       // transient "PERK ONLINE" / bonus notification
+    private var perkBannerTimer: Float = 0
 
     // Voice-callout edge tracking.
     private var voiceLowArmed = true, voiceCritArmed = true
@@ -304,10 +318,51 @@ final class Renderer: NSObject, MTKViewDelegate {
 
     // MARK: Warp cut-scene
 
+    /// Detect level-up perk unlocks as the player advances. Called from
+    /// `beginWarp` after `level` increments, so a perk earned by "reaching level
+    /// N" becomes usable on planet N. One-time per level (level only increments).
+    private func unlockPerks(reaching lvl: Int) {
+        switch lvl {
+        case 6:  notify("TARGETING COMPUTER ONLINE")
+        case 9:  notify("CLOAKING DEVICE ONLINE"); cloakActive = 0; cloakCooldown = 0
+        case 12: pulseCharges = 3; notify("RADIAL PULSE ARMED")
+        default: break
+        }
+        // Bonus points at level 15 and every third level thereafter.
+        if lvl >= 15 && (lvl - 15) % 3 == 0 {
+            combat.awardBonus(5000)
+            notify("BONUS +5000")
+        }
+    }
+
+    private func notify(_ text: String) { perkBanner = text; perkBannerTimer = 4 }
+
+    /// Targeting computer: keep the current lock while the craft stays within the
+    /// target zone (100px of the reticle); otherwise acquire the nearest craft in
+    /// the zone. Re-resolving the stable id each frame survives array compaction.
+    private func updateTargetLock() {
+        let cx = RenderConfig.crosshairX, cy = RenderConfig.crosshairY
+        let zone: Float = 100
+        if let id = targetLockId {
+            if let idx = enemies.index(forId: id),
+               let d = voxel.screenDistanceToReticle(ofEnemyAt: idx, in: enemies, camera: camera,
+                                                      crosshairX: cx, crosshairY: cy),
+               d <= zone {
+                return                              // lock still valid and in-zone
+            }
+            targetLockId = nil                      // died, left view, or left the zone
+        }
+        if let idx = voxel.lockableEnemy(in: enemies, camera: camera,
+                                         crosshairX: cx, crosshairY: cy, zoneRadius: zone) {
+            targetLockId = enemies.enemies[idx].id
+        }
+    }
+
     /// Start the warp: generate the next planet on a background thread while a
     /// cinematic plays, so there's no freeze.
     private func beginWarp() {
         level += 1
+        unlockPerks(reaching: level)
         state = .warping
         warpPhase = 0; warpTime = 0; warpReady = false
         warpTerrain = nil; warpVoxel = nil; warpStructures = nil; warpEnemies = nil
@@ -457,10 +512,18 @@ final class Renderer: NSObject, MTKViewDelegate {
     /// Abandon the current run and go back to the attract/title screen, leaving
     /// a fresh planet 1 staged so the next ENTER starts a clean game (the title
     /// → playing transition doesn't reload a planet itself).
+    /// Clear all per-run perk state (called when a fresh run begins).
+    private func resetPerks() {
+        pulseCharges = 0
+        targetLockId = nil
+        cloakActive = 0; cloakCooldown = 0; cloakLatch = false
+        perkBanner = nil; perkBannerTimer = 0
+    }
+
     private func returnToTitle() {
         level = 1
         combat = Combat()
-        pulseCharges = FeatureFlags.radialPulseWeapon ? 3 : 0
+        resetPerks()
         missionTime = 0
         loadPlanet(1)           // stage a clean run (also sets state = .playing)…
         state = .title          // …but show the attract screen until ENGAGE
@@ -477,6 +540,9 @@ final class Renderer: NSObject, MTKViewDelegate {
         let dt = Float(min(1.0 / 20.0, max(0.0, now - lastTime)))
         lastTime = now
         if state != .title && state != .lost && !paused { missionTime += dt }   // mission clock
+        // Perk notification fades only during play, so one set at warp-out (perks
+        // unlock as the warp begins) still shows its full span on the new planet.
+        if state == .playing && !paused && perkBannerTimer > 0 { perkBannerTimer -= dt }
 
         // Smoothed FPS for the optional HUD readout.
         if dt > 0 { fpsSmoothed += (1 / dt - fpsSmoothed) * 0.1 }
@@ -649,7 +715,7 @@ final class Renderer: NSObject, MTKViewDelegate {
             // "planet cleared" win below.
             if input.pulse && !pulseLatch {
                 pulseLatch = true
-                if pulseCharges > 0 && enemies.remaining > 0 {
+                if hasRadialPulse && pulseCharges > 0 && enemies.remaining > 0 {
                     pulseCharges -= 1
                     let wreckage = enemies.obliterateAll()
                     combat.detonate(at: wreckage, smoke: smoke)
@@ -658,13 +724,36 @@ final class Renderer: NSObject, MTKViewDelegate {
             }
             if !input.pulse { pulseLatch = false }
 
+            // Cloaking device (perk, level 9): 10s invisible, 60s recharge after
+            // it ends. Cooldown persists across warps (not refilled by finalizeWarp).
+            if input.cloak && !cloakLatch {
+                cloakLatch = true
+                if hasCloak && cloakActive <= 0 && cloakCooldown <= 0 {
+                    cloakActive = cloakDuration
+                    audio.whoosh(rising: false)
+                }
+            }
+            if !input.cloak { cloakLatch = false }
+            if cloakActive > 0 {
+                cloakActive = max(0, cloakActive - dt)
+                if cloakActive == 0 { cloakCooldown = cloakRecharge }   // recharge starts when cloak ends
+            } else if cloakCooldown > 0 {
+                cloakCooldown = max(0, cloakCooldown - dt)
+            }
+
             structures.tick(dt: dt)
             enemies.update(dt: dt, playerX: camera.x, playerY: camera.y, playerZ: camera.height,
-                           structures: structures, projectiles: projectiles, bombs: bombs)
+                           structures: structures, projectiles: projectiles, bombs: bombs,
+                           playerCloaked: cloakActive > 0)
+            // Targeting computer (perk, level 6): keep/refresh the lock BEFORE the
+            // fire hit-test so fire can be redirected to the locked craft.
+            if hasTargetingComputer { updateTargetLock() } else { targetLockId = nil }
+            let lockedIdx = targetLockId.flatMap { enemies.index(forId: $0) }
             // Player-fire hit-test BEFORE drawing sprites: the depth buffer
             // must hold terrain only, or a craft would occlude its own shot.
             combat.update(dt: dt, input: input, camera: camera, field: enemies, voxel: voxel, smoke: smoke,
-                          crosshairX: RenderConfig.crosshairX, crosshairY: RenderConfig.crosshairY)
+                          crosshairX: RenderConfig.crosshairX, crosshairY: RenderConfig.crosshairY,
+                          lockedTargetIndex: lockedIdx)
             // Advance enemy fire (hits drain hull) and the visible bombs
             // (aimed at structures — kept off the player by a far aim point).
             let hits = projectiles.update(dt: dt, playerX: camera.x, playerY: camera.y,
@@ -751,7 +840,7 @@ final class Renderer: NSObject, MTKViewDelegate {
                 restartLatch = true
                 level = 1
                 combat = Combat()               // game over — fresh run
-                pulseCharges = FeatureFlags.radialPulseWeapon ? 3 : 0
+                resetPerks()
                 missionTime = 0
                 loadPlanet(1)
             }
@@ -770,13 +859,24 @@ final class Renderer: NSObject, MTKViewDelegate {
         if flying { smoke.update(dt: dt, structures: structures, maxHealth: structures.maxHealth) }
 
         voxel.drawEnemies(enemies, camera: camera)
+        // Targeting computer: red dotted box around the locked craft.
+        if hasTargetingComputer, let li = targetLockId.flatMap({ enemies.index(forId: $0) }) {
+            voxel.drawLockBox(forEnemyAt: li, in: enemies, camera: camera, color: packRGBA(255, 60, 60))
+        }
         voxel.drawExplosions(combat.explosions, duration: combat.explosionDuration, camera: camera)
         voxel.drawProjectiles(bombs, camera: camera,                       // ordnance on bases — orange-red
                               glow: packRGBA(255, 120, 40), core: packRGBA(255, 220, 130))
         voxel.drawProjectiles(projectiles, camera: camera)                 // fire at you — hot yellow
         voxel.drawSmoke(smoke, camera: camera)                             // damage plumes + debris
         if combat.tracerActive {
-            voxel.drawTracers(crosshairX: RenderConfig.crosshairX, crosshairY: RenderConfig.crosshairY)
+            // Bolts converge on the locked craft when the targeting computer
+            // has a lock, otherwise on the fixed reticle.
+            var tx = RenderConfig.crosshairX, ty = RenderConfig.crosshairY
+            if hasTargetingComputer, let li = targetLockId.flatMap({ enemies.index(forId: $0) }),
+               let sp = voxel.screenPosition(ofEnemyAt: li, in: enemies, camera: camera) {
+                tx = sp.x; ty = sp.y
+            }
+            voxel.drawTracers(crosshairX: tx, crosshairY: ty)
         }
         voxel.drawDamageFlash(damageFlash)
         if active {
@@ -794,7 +894,11 @@ final class Renderer: NSObject, MTKViewDelegate {
                           roll: camera.roll, pitch: camera.pitch)
         voxel.drawRadar(camera: camera, enemies: enemies, structures: structures)
         chrono(on: voxel)
-        if FeatureFlags.radialPulseWeapon { voxel.drawPulseCharges(pulseCharges) }
+        if hasRadialPulse { voxel.drawPulseCharges(pulseCharges) }
+        if hasCloak { voxel.drawCloakStatus(active: cloakActive, cooldown: cloakCooldown) }
+        if let banner = perkBanner, perkBannerTimer > 0, state != .title, state != .lost {
+            voxel.drawNotification(banner, t: perkBannerTimer)
+        }
 
         if paused && state == .playing {
             voxel.drawBanner(title: "PAUSED", subtitle: "PRESS P TO RESUME")

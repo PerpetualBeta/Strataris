@@ -20,6 +20,7 @@ import Foundation
 enum EnemyKind { case destroyer, fighter, drone, mothership }
 
 struct Enemy {
+    var id: Int                // stable identity (survives array compaction on death)
     var kind: EnemyKind
     var x: Float
     var y: Float
@@ -48,6 +49,7 @@ final class EnemyField {
     private let terrain: Terrain
     private var fieldRng: UInt32
     private var motherTimer: Float
+    private var nextId = 0                       // monotonic id source for spawns
 
     // Tuning.
     private let fireRange: Float = 750
@@ -98,7 +100,8 @@ final class EnemyField {
         case .mothership: speed = 20; hover = 230; hp = 10; pts = 2500
         }
         var rng = rngSeed
-        return Enemy(kind: kind, x: x, y: y, z: terrain.heightF(x, y) + hover,
+        let eid = nextId; nextId += 1
+        return Enemy(id: eid, kind: kind, x: x, y: y, z: terrain.heightF(x, y) + hover,
                      heading: heading, speed: speed, hoverOffset: hover,
                      bobPhase: nextRand(&rng) * 6.2832, bobRate: 0.7 + nextRand(&rng) * 0.7,
                      wanderTimer: nextRand(&rng) * 2, rng: rng,
@@ -121,6 +124,10 @@ final class EnemyField {
     func mesh(for kind: EnemyKind) -> Mesh { meshes[kind]! }
 
     var remaining: Int { enemies.count }
+
+    /// Resolve a stable enemy id to its current array index (nil if it has died
+    /// or left). Counts are small, so a linear scan is fine.
+    func index(forId id: Int) -> Int? { enemies.firstIndex { $0.id == id } }
 
     // MARK: Damage
 
@@ -148,7 +155,8 @@ final class EnemyField {
     // MARK: Update
 
     func update(dt: Float, playerX: Float, playerY: Float, playerZ: Float,
-                structures: StructureField, projectiles: ProjectileField, bombs: ProjectileField) {
+                structures: StructureField, projectiles: ProjectileField, bombs: ProjectileField,
+                playerCloaked: Bool = false) {
         let mapSize = Float(terrain.size)
         func wrap(_ d: Float) -> Float {
             var r = d.truncatingRemainder(dividingBy: mapSize)
@@ -179,6 +187,7 @@ final class EnemyField {
             var handled = false
 
             func huntPlayer() {
+                if playerCloaked { return }     // can't see the player → fall through to wander
                 let ang = atan2f(pdy, pdx)
                 if pdist > strafeRange { e.heading = ang; v = e.speed * difficulty * 1.3 }
                 else { e.heading = ang + e.jukeSign * 1.2 }
@@ -218,13 +227,16 @@ final class EnemyField {
 
             case .mothership:
                 // Slow, menacing drift that gradually tracks the player; fires
-                // the occasional bolt.
-                let ang = atan2f(pdy, pdx)
-                var d = ang - e.heading
-                while d > .pi { d -= 2 * .pi }
-                while d < -.pi { d += 2 * .pi }
-                e.heading += d * min(1, dt * 0.3)
-                fireAtPlayer = pdist < fireRange * 1.6
+                // the occasional bolt. While the player is cloaked it loses the
+                // track and just holds its heading.
+                if !playerCloaked {
+                    let ang = atan2f(pdy, pdx)
+                    var d = ang - e.heading
+                    while d > .pi { d -= 2 * .pi }
+                    while d < -.pi { d += 2 * .pi }
+                    e.heading += d * min(1, dt * 0.3)
+                    fireAtPlayer = pdist < fireRange * 1.6
+                }
                 handled = true
 
             case .drone:
