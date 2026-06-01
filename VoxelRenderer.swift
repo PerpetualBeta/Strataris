@@ -1065,15 +1065,13 @@ final class VoxelRenderer {
             for x in 0..<W { fb[row + x] = darken(fb[row + x], keep) }
         }
 
-        // Title (extruded) + subtitle.
-        let title = "STRATARIS"
-        let ts = 6
-        let tx = (W - Font.width(title, scale: ts)) / 2, ty = Int(Hf * 0.10)
-        Font.draw(title, into: fb, w: W, h: H, x: tx, y: ty + ts, scale: ts, color: packRGBA(150, 40, 10), shadow: nil)
-        Font.draw(title, into: fb, w: W, h: H, x: tx, y: ty, scale: ts, color: packRGBA(255, 206, 48), shadow: nil)
+        // Title wordmark (bespoke ArcadeClassic-style logo) + subtitle.
+        let ty = Int(Hf * 0.07)
+        drawTitleLogo("STRATARIS", centerX: W / 2, topY: ty, time: time)
+        let logoBottom = ty + LogoFont.glyphHeight
         let sub = "GALACTIC COLONY DEFENCE"
         Font.draw(sub, into: fb, w: W, h: H, x: (W - Font.width(sub, scale: 2)) / 2,
-                  y: ty + 7 * ts + 10, scale: 2, color: packRGBA(190, 218, 255))
+                  y: logoBottom + 12, scale: 2, color: packRGBA(190, 218, 255))
 
         // Prompt (blink), hi-score, controls, credit.
         if sinf(time * 4) > -0.25 {
@@ -1092,6 +1090,125 @@ final class VoxelRenderer {
         let credit = "JORVIK SOFTWARE PRESENTS"
         Font.draw(credit, into: fb, w: W, h: H, x: (W - Font.width(credit, scale: 1)) / 2,
                   y: 6, scale: 1, color: packRGBA(150, 160, 185))
+    }
+
+    /// Bespoke wordmark alphabet in the spirit of Pizzadude's "ArcadeClassic" —
+    /// every glyph is built from stacked horizontal bars of varying length, with
+    /// thin gaps between them (the venetian-blind look of an 80s coin-op marquee).
+    /// Each letter is 7 stripes tall on a unit grid; the value for a stripe is a
+    /// bitmask of which unit columns are filled (high bit = leftmost). Only the
+    /// letters STRATARIS uses are defined: S, T, R, A, I. Widths vary per glyph.
+    enum LogoFont {
+        static let stripes = 7
+        static let unitW   = 6             // px per unit column
+        static let stripeH = 6             // px per bar
+        static let gapH    = 2             // px between bars
+        static let tracking = 1            // blank unit columns between glyphs
+        static var glyphHeight: Int { stripes * stripeH + (stripes - 1) * gapH }
+
+        // (unit width, 7 stripe column-masks). Lifted from the actual font.
+        static let glyphs: [Character: (w: Int, s: [UInt8])] = [
+            " ": (3, [0, 0, 0, 0, 0, 0, 0]),
+            "S": (7, [0b0111100, 0b1100110, 0b1100000, 0b0111110, 0b0000011, 0b1100011, 0b0111110]),
+            "T": (6, [0b111111,  0b001100,  0b001100,  0b001100,  0b001100,  0b001100,  0b001100]),
+            "R": (7, [0b1111110, 0b1100011, 0b1100011, 0b1100111, 0b1111100, 0b1101110, 0b1100111]),
+            "A": (7, [0b0011100, 0b0110110, 0b1100011, 0b1100011, 0b1111111, 0b1100011, 0b1100011]),
+            "I": (6, [0b111111,  0b001100,  0b001100,  0b001100,  0b001100,  0b001100,  0b111111]),
+        ]
+    }
+
+    /// Stylised "box art" wordmark for the title. The HUD font reads as plain big
+    /// text; a game's name deserves better. We rasterise the word in the bespoke
+    /// ArcadeClassic-style LogoFont above (stacked horizontal bars) into a local
+    /// mask, then layer the treatment a 16-bit logo would get: a chunky 3D
+    /// extrude, a dark keyline that lifts it off the busy terrain, a metallic
+    /// chrome→gold vertical gradient face with a bevel (top rim-light, bottom
+    /// shade), and a specular shine that sweeps across over time.
+    func drawTitleLogo(_ text: String, centerX: Int, topY: Int, time: Float) {
+        let upper = text.uppercased()
+        let uw = LogoFont.unitW, sh = LogoFont.stripeH, gp = LogoFont.gapH
+        let glyphsSeq = upper.map { LogoFont.glyphs[$0] ?? LogoFont.glyphs[" "]! }
+        let totalUnits = glyphsSeq.reduce(0) { $0 + $1.w } + (glyphsSeq.count - 1) * LogoFont.tracking
+        let faceW = totalUnits * uw
+        let faceH = LogoFont.glyphHeight
+        let pad   = 2                                      // keyline room
+        let bw = faceW + pad * 2
+        let bh = faceH + pad * 2
+        let ox = pad, oy = pad                             // face origin in bbox
+
+        // Mask of the glyph faces — each stripe is a `sh`-tall bar, gaps left clear.
+        var mask = [Bool](repeating: false, count: bw * bh)
+        var penUnit = 0
+        for gl in glyphsSeq {
+            for si in 0..<LogoFont.stripes {
+                let bits = gl.s[si]
+                let y0 = oy + si * (sh + gp)
+                for col in 0..<gl.w where bits & (UInt8(1) << (gl.w - 1 - col)) != 0 {
+                    let x0 = ox + (penUnit + col) * uw
+                    for yy in 0..<sh { let r = (y0 + yy) * bw; for xx in 0..<uw { mask[r + x0 + xx] = true } }
+                }
+            }
+            penUnit += gl.w + LogoFont.tracking
+        }
+        @inline(__always) func solid(_ x: Int, _ y: Int) -> Bool {
+            x >= 0 && x < bw && y >= 0 && y < bh && mask[y * bw + x]
+        }
+
+        let fb = framebuffer, W = width, H = height
+        let bx = centerX - faceW / 2 - ox                  // bbox top-left in fb
+        let by = topY - oy
+        @inline(__always) func put(_ lx: Int, _ ly: Int, _ c: UInt32) {
+            let px = bx + lx, py = by + ly
+            if px >= 0 && px < W && py >= 0 && py < H { fb[py * W + px] = c }
+        }
+
+        // Brushed-aluminium ramp: cool blue-grey, light top edge → mid steel →
+        // soft dark band → faint relight → dull base. Muted, low-chroma.
+        let stops: [(Float, Float, Float, Float)] = [
+            (0.00, 222, 227, 234), (0.18, 188, 194, 203), (0.45, 142, 149, 161),
+            (0.50,  92,  98, 111), (0.57, 150, 157, 168), (0.80, 178, 184, 193),
+            (1.00, 112, 118, 130),
+        ]
+        @inline(__always) func ramp(_ t: Float) -> (Float, Float, Float) {
+            var i = 0; while i < stops.count - 1 && t > stops[i + 1].0 { i += 1 }
+            let a = stops[i], b = stops[min(i + 1, stops.count - 1)]
+            let span = max(0.0001, b.0 - a.0), k = min(1, max(0, (t - a.0) / span))
+            return (a.1 + (b.1 - a.1) * k, a.2 + (b.2 - a.2) * k, a.3 + (b.3 - a.3) * k)
+        }
+
+        // Pass 1 — dark keyline around the face (1px, 8-neighbourhood). No 3D
+        // extrude: with the glyphs split into separate stripes, a per-bar extrude
+        // leaves stray dark nubs in the gaps; the keyline + bevel carry the depth.
+        let keyline = packRGBA(14, 16, 22)
+        for ly in 0..<bh {
+            for lx in 0..<bw where !solid(lx, ly) {
+                if solid(lx-1, ly) || solid(lx+1, ly) || solid(lx, ly-1) || solid(lx, ly+1) ||
+                   solid(lx-1, ly-1) || solid(lx+1, ly-1) || solid(lx-1, ly+1) || solid(lx+1, ly+1) {
+                    put(lx, ly, keyline)
+                }
+            }
+        }
+
+        // Pass 2 — gradient face + soft bevel + brushed grain + dull sheen.
+        let sweep = (time * 0.32).truncatingRemainder(dividingBy: 2.2)  // slow, off-screen pause
+        for ly in 0..<bh {
+            let t = min(1, max(0, Float(ly - oy) / Float(faceH)))
+            let (rr, gg, bb) = ramp(t)
+            for lx in 0..<bw where mask[ly * bw + lx] {
+                var r = rr, g = gg, b = bb
+                if !solid(lx, ly - 1) { r = min(255, r*0.6 + 78); g = min(255, g*0.6 + 80); b = min(255, b*0.6 + 84) }   // soft top edge
+                else if !solid(lx, ly + 1) { r *= 0.52; g *= 0.52; b *= 0.56 }                                          // bottom shade (cool)
+                if !solid(lx - 1, ly) { r = min(255, r + 16); g = min(255, g + 16); b = min(255, b + 18) }              // faint left catch
+                // brushed grain: faint vertical streaks (the metal's grain runs along the bars)
+                let grain = Float((lx &* 2654435761) >> 27 & 0x7) - 3.5    // deterministic, ~[-3.5, 3.5]
+                r += grain; g += grain; b += grain
+                // dull anisotropic sheen — broad and low, drifting across the word
+                let diag = (Float(lx) - Float(ly) * 0.5) / Float(faceW)
+                let dist = abs(diag - (sweep - 0.5))
+                if dist < 0.16 { let k = (1 - dist / 0.16) * 0.22; r += (236 - r)*k; g += (239 - g)*k; b += (244 - b)*k }
+                put(lx, ly, packRGBA(UInt8(min(255, max(0, r))), UInt8(min(255, max(0, g))), UInt8(min(255, max(0, b)))))
+            }
+        }
     }
 
     /// Original mission lore for the briefing crawl. Uppercase only, and no
