@@ -38,11 +38,31 @@ private func perspectiveRH(fovY: Float, aspect: Float, near: Float, far: Float) 
 // MARK: - Free camera (quaternion orientation, no gimbal lock under loops)
 
 struct Camera6DOF {
+    enum Mode { case restricted, full }
+
     var position: SIMD3<Float>
     var orientation: simd_quatf
     var fovY: Float = 1.05            // ~60°
     var near: Float = 1
-    var far: Float = 1600
+    var far: Float = 2600             // covers the altitude-scaled draw distance
+
+    /// Flight envelope. `.restricted` (levels 1–2) clamps pitch and turns with a
+    /// coordinated bank, keeping "up" near world-up so it feels like the shipping
+    /// game; `.full` (the level-3 Axis Unlock perk) is unconstrained 6DOF.
+    var mode: Mode = .restricted
+    // Restricted-mode euler state (heading/pitch are authoritative there; bank is
+    // an eased cosmetic roll for the coordinated turn).
+    var heading: Float = 0
+    var pitch: Float = 0
+    var bank: Float = 0
+
+    /// Orientation for level flight at heading 0 (forward -Y, up +Z).
+    static let levelBase: simd_quatf = {
+        let f = SIMD3<Float>(0, -1, 0), up = SIMD3<Float>(0, 0, 1)
+        let r = simd_normalize(simd_cross(f, up))
+        let u = simd_cross(r, f)
+        return simd_quatf(simd_float3x3(columns: (r, u, -f)))
+    }()
 
     /// Initial orientation: forward = world -Y, up = world +Z (matches the
     /// game's angle-0 heading), derived from an explicit basis.
@@ -80,6 +100,55 @@ struct Camera6DOF {
         if yaw   != 0 { q = q * simd_quatf(angle: yaw,   axis: SIMD3(0, 1, 0)) }
         if roll  != 0 { q = q * simd_quatf(angle: roll,  axis: SIMD3(0, 0, -1)) }  // about forward
         orientation = q.normalized
+    }
+
+    /// Full 6DOF integration (level-3 Axis Unlock): free body-frame rotation.
+    mutating func flyFull(pitch: Float, yaw: Float, roll: Float, dt: Float,
+                          rate: Float = 1.9, yawRate: Float = 1.1) {
+        rotateBody(pitch: pitch * rate * dt, yaw: yaw * yawRate * dt, roll: roll * rate * dt)
+    }
+
+    /// Restricted envelope (levels 1–2): a `turn` banks-and-yaws (coordinated
+    /// turn), pitch is clamped, and "up" stays near world-up — the shipping feel.
+    mutating func flyRestricted(turn: Float, pitchIn: Float, dt: Float,
+                                yawRate: Float = 1.4, pitchRate: Float = 1.4,
+                                maxPitch: Float = 0.5, bankMax: Float = 0.5,
+                                levelRate: Float = 2.5) {
+        heading += turn * yawRate * dt
+        if pitchIn != 0 {
+            pitch = max(-maxPitch, min(maxPitch, pitch + pitchIn * pitchRate * dt))
+        } else {
+            pitch += (0 - pitch) * min(1, dt * levelRate)       // hands-off → ease nose to level
+        }
+        bank += (turn * bankMax - bank) * min(1, dt * 8)        // wings level when not turning
+        let qYaw   = simd_quatf(angle: heading, axis: SIMD3(0, 0, 1))   // world up = +Z
+        let qPitch = simd_quatf(angle: pitch,   axis: SIMD3(1, 0, 0))   // body right
+        let qBank  = simd_quatf(angle: bank,    axis: SIMD3(0, 0, -1))  // body forward
+        orientation = qYaw * Camera6DOF.levelBase * qPitch * qBank
+    }
+
+    /// Hands-off auto-level for full 6DOF: ease the orientation toward upright at
+    /// the current heading (wings level, nose to horizon) via the shortest arc,
+    /// so releasing the stick recovers from any attitude — even inverted.
+    mutating func autoLevelFull(dt: Float, rate: Float = 1.6) {
+        let f = forward
+        let horiz = sqrtf(f.x * f.x + f.y * f.y)
+        let hd = horiz > 0.001 ? atan2f(f.x, -f.y) : heading
+        let target = simd_quatf(angle: hd, axis: SIMD3(0, 0, 1)) * Camera6DOF.levelBase
+        orientation = simd_slerp(orientation, target, min(1, dt * rate))
+    }
+
+    /// Switch envelope, keeping the view continuous. Entering restricted derives
+    /// heading/pitch from the current facing and levels the wings.
+    mutating func setMode(_ m: Mode) {
+        guard m != mode else { return }
+        if m == .restricted {
+            let f = forward
+            heading = atan2f(f.x, -f.y)
+            pitch = asinf(max(-1, min(1, f.z)))
+            bank = 0
+        }
+        mode = m
     }
 }
 
@@ -121,13 +190,15 @@ final class MeshTerrainRenderer {
     private let terrain: Terrain
     private let patchN: Int                 // cells per side
     private let vertsPerSide: Int           // patchN + 1
-    let patchHalf: Float                    // world half-extent (for fog tuning)
     private let recenterStep: Int           // rebuild once the camera drifts this many cells
+    private(set) var cellStride = 1         // world units per cell — grows with altitude (LOD)
+    /// World half-extent of the patch (for fog/far tuning); scales with stride.
+    var worldHalf: Float { Float(patchN / 2 * cellStride) }
     private let ibuf: MTLBuffer
     private let indexCount: Int
     private var vbufs: [MTLBuffer]          // pool, cycled so an in-flight frame isn't overwritten
     private var activeVB = 0
-    private var centerCell: SIMD2<Int>
+    private var centerCell: SIMD2<Int>      // patch centre, world coords (quantised to stride)
     private var building = false
     private let buildQueue = DispatchQueue(label: "cc.jorviksoftware.strataris.meshbuild")
 
@@ -155,8 +226,10 @@ final class MeshTerrainRenderer {
         return o;
     }
     fragment float4 f_mesh(VOut in [[stage_in]], constant MeshU& u [[buffer(1)]]) {
-        float3 c = mix(in.color.rgb, u.fogColor.rgb, in.fogT);   // full fog at the patch edge
-        return float4(c, 1.0);
+        // Fade to transparent with distance and let the sky (drawn first) show
+        // through, so the patch edge dissolves into the exact sky — no hard seam,
+        // no colour mismatch.
+        return float4(in.color.rgb, 1.0 - in.fogT);
     }
 
     // Full-screen sky: reconstruct the world-space view ray per pixel from the
@@ -179,23 +252,25 @@ final class MeshTerrainRenderer {
         float t = dir.z;                                // world up = +z
         float3 zenith  = float3(0.16, 0.34, 0.62);
         float3 horizon = float3(0.62, 0.74, 0.86);
-        float3 ground  = float3(0.30, 0.32, 0.30);
+        float3 ground  = float3(0.50, 0.58, 0.66);   // hazy, not dark — blends with fog
         float3 c = t >= 0.0 ? mix(horizon, zenith, smoothstep(0.0, 0.55, t))
-                            : mix(horizon, ground, smoothstep(0.0, -0.35, t));
+                            : mix(horizon, ground, smoothstep(0.0, -0.5, t));
         return float4(c, 1.0);
     }
     """
 
     init?(device: MTLDevice, terrain: Terrain, width: Int, height: Int,
-          patchCells: Int = 640, patchCenterX: Int = 512, patchCenterY: Int = 512) {
+          patchCells: Int = 1024, patchCenterX: Int = 512, patchCenterY: Int = 512) {
         self.device = device
         self.width = width
         self.height = height
         self.terrain = terrain
         self.patchN = patchCells
         self.vertsPerSide = patchCells + 1
-        self.patchHalf = Float(patchCells) / 2
-        self.recenterStep = max(8, patchCells / 8)
+        // Recenter often enough that the patch edge always stays beyond the fog
+        // (worldHalf - drift > fog end), so the seam never peeks out — new terrain
+        // is born fully fogged and fades in rather than popping.
+        self.recenterStep = max(8, patchCells / 12)
         self.centerCell = SIMD2<Int>(patchCenterX, patchCenterY)
         guard let q = device.makeCommandQueue() else { return nil }
         self.queue = q
@@ -216,6 +291,14 @@ final class MeshTerrainRenderer {
             md.fragmentFunction = lib.makeFunction(name: "f_mesh")
             md.vertexDescriptor = vdesc
             md.colorAttachments[0].pixelFormat = .rgba8Unorm
+            // Alpha-blend so distant terrain dissolves into the sky behind it.
+            md.colorAttachments[0].isBlendingEnabled = true
+            md.colorAttachments[0].rgbBlendOperation = .add
+            md.colorAttachments[0].alphaBlendOperation = .add
+            md.colorAttachments[0].sourceRGBBlendFactor = .sourceAlpha
+            md.colorAttachments[0].destinationRGBBlendFactor = .oneMinusSourceAlpha
+            md.colorAttachments[0].sourceAlphaBlendFactor = .one
+            md.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
             md.depthAttachmentPixelFormat = .depth32Float
             self.meshPipeline = try device.makeRenderPipelineState(descriptor: md)
 
@@ -276,7 +359,7 @@ final class MeshTerrainRenderer {
         }
         self.vbufs = pool
         let verts0 = MeshTerrainRenderer.buildVertices(terrain: terrain, patchN: n,
-                                                       center: SIMD2<Int>(patchCenterX, patchCenterY))
+                                                       center: SIMD2<Int>(patchCenterX, patchCenterY), stride: 1)
         verts0.withUnsafeBytes { raw in pool[0].contents().copyMemory(from: raw.baseAddress!, byteCount: raw.count) }
 
         // A single bright marker object (a small pyramid) sitting on the terrain,
@@ -304,14 +387,16 @@ final class MeshTerrainRenderer {
     }
 
     /// Sample a `patchN`-cell window of the (wrapping) heightmap around `center`
-    /// into world-space vertices. Static so it's safe to call off the main thread.
-    private static func buildVertices(terrain: Terrain, patchN n: Int, center: SIMD2<Int>) -> [MeshVertex] {
-        let x0 = center.x - n / 2, y0 = center.y - n / 2
+    /// at `stride` world units per cell, into world-space vertices. Larger stride
+    /// → coarser mesh covering more ground (used at altitude). Static so it's safe
+    /// to call off the main thread.
+    private static func buildVertices(terrain: Terrain, patchN n: Int, center: SIMD2<Int>, stride: Int) -> [MeshVertex] {
+        let x0 = center.x - (n / 2) * stride, y0 = center.y - (n / 2) * stride
         var verts = [MeshVertex](); verts.reserveCapacity((n + 1) * (n + 1))
         for j in 0...n {
-            let wy = Float(y0 + j)
+            let wy = Float(y0 + j * stride)
             for i in 0...n {
-                let wx = Float(x0 + i)
+                let wx = Float(x0 + i * stride)
                 let h = terrain.heightF(wx, wy)
                 let c = terrain.colorAt(wx, wy)
                 let col = SIMD4<Float>(Float(c & 0xFF) / 255, Float((c >> 8) & 0xFF) / 255,
@@ -322,31 +407,44 @@ final class MeshTerrainRenderer {
         return verts
     }
 
-    private func swapIn(_ verts: [MeshVertex], center: SIMD2<Int>) {
+    /// Cell stride for a given height above the terrain — coarser (wider) the
+    /// higher you climb, so the view reaches further without more vertices.
+    private func strideForAltitude(_ pos: SIMD3<Float>) -> Int {
+        let alt = pos.z - terrain.heightF(pos.x, pos.y)
+        return max(1, min(4, 1 + Int(alt / 250)))
+    }
+
+    private func swapIn(_ verts: [MeshVertex], center: SIMD2<Int>, stride: Int) {
         let next = (activeVB + 1) % vbufs.count
         verts.withUnsafeBytes { raw in
             vbufs[next].contents().copyMemory(from: raw.baseAddress!, byteCount: raw.count)
         }
-        activeVB = next; centerCell = center; building = false
+        activeVB = next; centerCell = center; cellStride = stride; building = false
     }
 
-    /// Recenter the patch on the camera once it drifts past `recenterStep` cells.
-    /// Async (default): rebuild on a background queue, swap on the main thread.
-    /// `sync: true` rebuilds inline (headless capture has no run loop to drain
-    /// the main queue). Terrain wraps, so this never hits an edge.
+    /// Recenter (and re-LOD) the patch on the camera. Rebuilds when the camera
+    /// drifts past `recenterStep` cells OR the altitude stride changes. Async by
+    /// default; `sync: true` rebuilds inline (headless capture has no run loop to
+    /// drain the main queue). Terrain wraps, so this never hits an edge.
     func recenterIfNeeded(around pos: SIMD3<Float>, sync: Bool = false) {
         if building { return }
-        let cell = SIMD2<Int>(Int(pos.x.rounded()), Int(pos.y.rounded()))
-        if max(abs(cell.x - centerCell.x), abs(cell.y - centerCell.y)) < recenterStep { return }
+        let stride = strideForAltitude(pos)
+        // Quantise the centre to the stride grid so vertices don't shimmer as the
+        // window slides at stride > 1.
+        let q = Float(stride)
+        let cell = SIMD2<Int>(Int((pos.x / q).rounded()) * stride, Int((pos.y / q).rounded()) * stride)
+        let drift = max(abs(cell.x - centerCell.x), abs(cell.y - centerCell.y))
+        if stride == cellStride && drift < recenterStep * stride { return }
         building = true
         if sync {
-            swapIn(MeshTerrainRenderer.buildVertices(terrain: terrain, patchN: patchN, center: cell), center: cell)
+            swapIn(MeshTerrainRenderer.buildVertices(terrain: terrain, patchN: patchN, center: cell, stride: stride),
+                   center: cell, stride: stride)
             return
         }
         let n = patchN, terrain = self.terrain
         buildQueue.async { [weak self] in
-            let verts = MeshTerrainRenderer.buildVertices(terrain: terrain, patchN: n, center: cell)
-            DispatchQueue.main.async { self?.swapIn(verts, center: cell) }
+            let verts = MeshTerrainRenderer.buildVertices(terrain: terrain, patchN: n, center: cell, stride: stride)
+            DispatchQueue.main.async { self?.swapIn(verts, center: cell, stride: stride) }
         }
     }
 
@@ -384,7 +482,7 @@ final class MeshTerrainRenderer {
         var u = MeshUniforms(mvp: vp,
                              eye: SIMD4<Float>(camera.position, 1),
                              fogColor: SIMD4<Float>(0.62, 0.74, 0.86, 1),
-                             fogParams: SIMD4<Float>(patchHalf * 0.55, patchHalf * 0.92, 0, 0))
+                             fogParams: SIMD4<Float>(worldHalf * 0.45, worldHalf * 0.82, 0, 0))
         enc.setRenderPipelineState(meshPipeline)
         enc.setDepthStencilState(meshDepth)
         enc.setVertexBytes(&u, length: MemoryLayout<MeshUniforms>.stride, index: 1)
@@ -444,6 +542,20 @@ enum Spike6DOF {
             writePPM(rgb, w: w, h: h, path: "/tmp/strataris_6dof_\(name).ppm")
         }
 
+        // Restricted-envelope sanity: level horizon; a coordinated bank when
+        // turning; pitch that clamps at the envelope limit (no looping).
+        var rcLevel = Camera6DOF.start(position: eye)        // starts .restricted
+        rcLevel.flyRestricted(turn: 0, pitchIn: 0, dt: 1.0 / 60)
+        writePPM(r.renderToRGB(camera: rcLevel), w: w, h: h, path: "/tmp/strataris_6dof_restricted_level.ppm")
+
+        var rcBank = Camera6DOF.start(position: eye)
+        for _ in 0..<30 { rcBank.flyRestricted(turn: 1, pitchIn: 0, dt: 1.0 / 30) }   // bank into a turn
+        writePPM(r.renderToRGB(camera: rcBank), w: w, h: h, path: "/tmp/strataris_6dof_restricted_bank.ppm")
+
+        var rcPitch = Camera6DOF.start(position: eye)
+        for _ in 0..<120 { rcPitch.flyRestricted(turn: 0, pitchIn: 1, dt: 1.0 / 30) } // hold nose-up → clamps
+        writePPM(r.renderToRGB(camera: rcPitch), w: w, h: h, path: "/tmp/strataris_6dof_restricted_pitchclamp.ppm")
+
         // Streaming check: advance horizontally a long way (past the 4096 wrap),
         // holding altitude above the terrain and looking down for a vista, while
         // recentering the patch. Every frame should still have terrain that fades
@@ -458,6 +570,14 @@ enum Spike6DOF {
             let rgb = r.renderToRGB(camera: fcam)
             writePPM(rgb, w: w, h: h, path: "/tmp/strataris_6dof_flight\(step).ppm")
         }
+
+        // Altitude-LOD check: from way up, the stride widens so the patch reaches
+        // much further than at ground level.
+        let hz = terrain.heightF(512, 560) + 850
+        var hcam = Camera6DOF.start(position: SIMD3(512, 560, hz))
+        hcam.rotateBody(pitch: -0.6, yaw: 0, roll: 0)
+        r.recenterIfNeeded(around: hcam.position, sync: true)
+        writePPM(r.renderToRGB(camera: hcam), w: w, h: h, path: "/tmp/strataris_6dof_highalt.ppm")
 
         // Rough timing (GPU fill is trivial at 480×270; this is a sanity floor).
         let t0 = CACurrentMediaTime()
@@ -495,6 +615,7 @@ private final class SpikeInput {
     var yawLeft = false, yawRight = false
     var faster = false, slower = false
     var resetLevel = false
+    var toggleMode = false
 
     func set(keyCode: Int, down: Bool) -> Bool {
         switch keyCode {
@@ -507,6 +628,7 @@ private final class SpikeInput {
         case kVK_ANSI_W, kVK_ANSI_Equal: faster = down
         case kVK_ANSI_S, kVK_ANSI_Minus: slower = down
         case kVK_Space:      resetLevel = down
+        case kVK_ANSI_T:     toggleMode = down         // restricted ↔ full (stand-in for L3 unlock)
         default: return false
         }
         return true
@@ -548,12 +670,12 @@ final class Spike6DOFController: NSObject, MTKViewDelegate {
     private var blitPipeline: MTLRenderPipelineState?
     private var lastTime: CFTimeInterval = 0
     private var speed: Float = 120
+    private var modeLatch = false
 
     init?(device: MTLDevice, view: Spike6DOFView) {
         self.terrain = Terrain(seed: Renderer6DOFSeed)
         guard let r = MeshTerrainRenderer(device: device, terrain: terrain,
-                                          width: RenderConfig.width, height: RenderConfig.height,
-                                          patchCells: 512),
+                                          width: RenderConfig.width, height: RenderConfig.height),
               let q = device.makeCommandQueue() else { return nil }
         self.renderer = r
         self.blitQueue = q
@@ -579,17 +701,48 @@ final class Spike6DOFController: NSObject, MTKViewDelegate {
         lastTime = now
 
         let k = (view?.keys) ?? SpikeInput()
-        let rate: Float = 1.9, yawRate: Float = 1.1
-        let pitch = (k.pitchUp ? rate : 0) - (k.pitchDown ? rate : 0)
-        let roll  = (k.rollRight ? rate : 0) - (k.rollLeft ? rate : 0)
-        let yaw   = (k.yawLeft ? yawRate : 0) - (k.yawRight ? yawRate : 0)
-        camera.rotateBody(pitch: pitch * dt, yaw: yaw * dt, roll: roll * dt)
-        if k.resetLevel {
-            camera = Camera6DOF.start(position: camera.position)   // snap upright
+
+        // T toggles the flight envelope (stands in for reaching the level-3 Axis
+        // Unlock perk); reflect it in the window title.
+        if k.toggleMode && !modeLatch {
+            modeLatch = true
+            camera.setMode(camera.mode == .restricted ? .full : .restricted)
+            view?.window?.title = camera.mode == .restricted
+                ? "Strataris — 6DOF (RESTRICTED envelope)"
+                : "Strataris — 6DOF (FULL — Axis Unlock)"
         }
+        if !k.toggleMode { modeLatch = false }
+
+        let pitchIn = (k.pitchUp ? 1 : 0) - (k.pitchDown ? 1 : 0)
+        // Left-positive so → keypress banks/rolls right (matches the keypress).
+        let bankIn  = (k.rollLeft ? 1 : 0) - (k.rollRight ? 1 : 0)
+        if camera.mode == .restricted {
+            // Arrows bank-and-turn (L/R) and pitch (U/D), clamped envelope.
+            camera.flyRestricted(turn: Float(bankIn), pitchIn: Float(pitchIn), dt: dt)
+        } else {
+            // Full 6DOF: arrows roll/pitch, A/D yaw. Hands-off → ease back to level.
+            let yaw = (k.yawLeft ? 1 : 0) - (k.yawRight ? 1 : 0)
+            if pitchIn == 0 && bankIn == 0 && yaw == 0 {
+                camera.autoLevelFull(dt: dt)
+            } else {
+                camera.flyFull(pitch: Float(pitchIn), yaw: Float(yaw), roll: Float(bankIn), dt: dt)
+            }
+        }
+        if k.resetLevel {                              // Space → recover to level flight
+            camera.setMode(.restricted)
+            camera.pitch = 0; camera.bank = 0
+            camera.flyRestricted(turn: 0, pitchIn: 0, dt: dt)
+            view?.window?.title = "Strataris — 6DOF (RESTRICTED envelope)"
+        }
+
         if k.faster { speed = min(420, speed + 160 * dt) }
         if k.slower { speed = max(0, speed - 160 * dt) }
         camera.position += camera.forward * speed * dt
+
+        // Ground collision: keep the ship above the terrain (no falling through).
+        let floor = terrain.heightF(camera.position.x, camera.position.y) + 10
+        if camera.position.z < floor { camera.position.z = floor }
+
         renderer.recenterIfNeeded(around: camera.position)
 
         guard let cmd = renderer.encode(camera: camera) else { return }
