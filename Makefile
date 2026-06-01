@@ -37,6 +37,7 @@ SWIFT_SOURCES    := main.swift \
                     Combat.swift \
                     Smoke.swift \
                     Font.swift \
+                    Spike6DOF.swift \
                     PlanetTheme.swift \
                     Projectile.swift \
                     TextImage.swift \
