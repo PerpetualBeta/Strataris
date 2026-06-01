@@ -35,6 +35,21 @@ private func perspectiveRH(fovY: Float, aspect: Float, near: Float, far: Float) 
         SIMD4<Float>(0,  0,  zs * near, 0)))
 }
 
+/// World transform for a craft: orient model-space (forward +Y, up +Z, right +X)
+/// onto the enemy's facing, scaled to its world size, placed at its position.
+func enemyModel(_ e: Enemy, scale s: Float) -> simd_float4x4 {
+    let fwd = simd_normalize(SIMD3<Float>(e.fwdX, e.fwdY, e.fwdZ))
+    var right = simd_cross(fwd, SIMD3<Float>(0, 0, 1))
+    if simd_length(right) < 1e-4 { right = SIMD3<Float>(1, 0, 0) }   // facing ≈ world up
+    right = simd_normalize(right)
+    let up = simd_cross(right, fwd)
+    return simd_float4x4(columns: (
+        SIMD4<Float>(right * s, 0),
+        SIMD4<Float>(fwd * s, 0),
+        SIMD4<Float>(up * s, 0),
+        SIMD4<Float>(e.x, e.y, e.z, 1)))
+}
+
 // MARK: - Free camera (quaternion orientation, no gimbal lock under loops)
 
 struct Camera6DOF {
@@ -120,11 +135,19 @@ struct Camera6DOF {
         } else {
             pitch += (0 - pitch) * min(1, dt * levelRate)       // hands-off → ease nose to level
         }
-        bank += (turn * bankMax - bank) * min(1, dt * 8)        // wings level when not turning
+        bank += (-turn * bankMax - bank) * min(1, dt * 8)       // bank into the turn; level when straight
         let qYaw   = simd_quatf(angle: heading, axis: SIMD3(0, 0, 1))   // world up = +Z
         let qPitch = simd_quatf(angle: pitch,   axis: SIMD3(1, 0, 0))   // body right
         let qBank  = simd_quatf(angle: bank,    axis: SIMD3(0, 0, -1))  // body forward
         orientation = qYaw * Camera6DOF.levelBase * qPitch * qBank
+    }
+
+    /// Bank-to-turn (full 6DOF): yaw the heading about world-up in proportion to
+    /// how banked the wings are, so rolling into a bank actually turns the craft
+    /// like an aircraft (rolling alone wouldn't change heading). Zero when level.
+    mutating func bankToTurn(dt: Float, gain: Float = 1.7) {
+        let dyaw = right.z * gain * dt        // right wing low (right.z < 0) → turn right
+        orientation = simd_quatf(angle: dyaw, axis: SIMD3(0, 0, 1)) * orientation
     }
 
     /// Hands-off auto-level for full 6DOF: ease the orientation toward upright at
@@ -170,6 +193,20 @@ private struct MeshVertex {
     var color: SIMD4<Float>
 }
 
+private struct EntityVertex {
+    var pos: SIMD3<Float>          // pos @0, normal @16, colour @32 — stride 48
+    var normal: SIMD3<Float>
+    var color: SIMD4<Float>
+}
+
+private struct EntityUniforms {
+    var vp: simd_float4x4          // proj * view
+    var model: simd_float4x4       // per-craft world transform (rotate + scale + place)
+    var eye: SIMD4<Float>          // camera position (fog distance)
+    var light: SIMD4<Float>        // world light direction
+    var fog: SIMD4<Float>          // x = near, y = far
+}
+
 // MARK: - Mesh-terrain renderer
 
 final class MeshTerrainRenderer {
@@ -177,8 +214,10 @@ final class MeshTerrainRenderer {
     private let queue: MTLCommandQueue
     private let meshPipeline: MTLRenderPipelineState
     private let skyPipeline: MTLRenderPipelineState
+    private let entityPipeline: MTLRenderPipelineState
     private let meshDepth: MTLDepthStencilState        // less + write
     private let skyDepth: MTLDepthStencilState         // always + no write
+    private var entityBuffers: [EnemyKind: (buf: MTLBuffer, count: Int)] = [:]
 
     let width: Int, height: Int
     let colorTex: MTLTexture
@@ -230,6 +269,28 @@ final class MeshTerrainRenderer {
         // through, so the patch edge dissolves into the exact sky — no hard seam,
         // no colour mismatch.
         return float4(in.color.rgb, 1.0 - in.fogT);
+    }
+
+    // Lit, flat-shaded craft (enemies). Per-face normals → faceted look; shading
+    // rotates with the craft. Fades with distance like the terrain.
+    struct EntU { float4x4 vp; float4x4 model; float4 eye; float4 light; float4 fog; };
+    struct EVIn  { float3 pos [[attribute(0)]]; float3 nrm [[attribute(1)]]; float4 col [[attribute(2)]]; };
+    struct EVOut { float4 position [[position]]; float3 shaded; float fogT; };
+
+    vertex EVOut v_entity(EVIn in [[stage_in]], constant EntU& u [[buffer(1)]]) {
+        float4 wp = u.model * float4(in.pos, 1.0);
+        float3x3 rot = float3x3(u.model[0].xyz, u.model[1].xyz, u.model[2].xyz);
+        float3 n = normalize(rot * in.nrm);
+        float d = max(0.0, dot(n, normalize(u.light.xyz)));
+        EVOut o;
+        o.position = u.vp * wp;
+        o.shaded = in.col.rgb * (0.45 + 0.55 * d);
+        float dist = distance(wp.xyz, u.eye.xyz);
+        o.fogT = clamp((dist - u.fog.x) / max(1.0, u.fog.y - u.fog.x), 0.0, 1.0);
+        return o;
+    }
+    fragment float4 f_entity(EVOut in [[stage_in]]) {
+        return float4(in.shaded, 1.0 - in.fogT);
     }
 
     // Full-screen sky: reconstruct the world-space view ray per pixel from the
@@ -308,6 +369,27 @@ final class MeshTerrainRenderer {
             sd.colorAttachments[0].pixelFormat = .rgba8Unorm
             sd.depthAttachmentPixelFormat = .depth32Float
             self.skyPipeline = try device.makeRenderPipelineState(descriptor: sd)
+
+            // Entity (craft) layout: float3 pos @0, float3 normal @16, float4 col @32.
+            let evd = MTLVertexDescriptor()
+            evd.attributes[0].format = .float3; evd.attributes[0].offset = 0;  evd.attributes[0].bufferIndex = 0
+            evd.attributes[1].format = .float3; evd.attributes[1].offset = 16; evd.attributes[1].bufferIndex = 0
+            evd.attributes[2].format = .float4; evd.attributes[2].offset = 32; evd.attributes[2].bufferIndex = 0
+            evd.layouts[0].stride = 48
+            let ed = MTLRenderPipelineDescriptor()
+            ed.vertexFunction = lib.makeFunction(name: "v_entity")
+            ed.fragmentFunction = lib.makeFunction(name: "f_entity")
+            ed.vertexDescriptor = evd
+            ed.colorAttachments[0].pixelFormat = .rgba8Unorm
+            ed.colorAttachments[0].isBlendingEnabled = true
+            ed.colorAttachments[0].rgbBlendOperation = .add
+            ed.colorAttachments[0].alphaBlendOperation = .add
+            ed.colorAttachments[0].sourceRGBBlendFactor = .sourceAlpha
+            ed.colorAttachments[0].destinationRGBBlendFactor = .oneMinusSourceAlpha
+            ed.colorAttachments[0].sourceAlphaBlendFactor = .one
+            ed.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
+            ed.depthAttachmentPixelFormat = .depth32Float
+            self.entityPipeline = try device.makeRenderPipelineState(descriptor: ed)
         } catch { print("6DOF: pipeline build failed — \(error)"); return nil }
 
         let dsMesh = MTLDepthStencilDescriptor()
@@ -384,6 +466,33 @@ final class MeshTerrainRenderer {
               let mib = device.makeBuffer(bytes: &midx, length: midx.count * MemoryLayout<UInt32>.stride)
         else { return nil }
         self.markerVBuf = mvb; self.markerIBuf = mib
+
+        // Per-kind craft meshes → GPU buffers (built once).
+        let kinds: [(EnemyKind, Mesh)] = [(.fighter, .fighter()), (.destroyer, .destroyer()),
+                                          (.drone, .drone()), (.mothership, .mothership())]
+        for (kind, mesh) in kinds {
+            if let eb = MeshTerrainRenderer.buildEntityBuffer(device: device, mesh: mesh) {
+                entityBuffers[kind] = eb
+            }
+        }
+    }
+
+    /// Expand a Mesh into flat-shaded triangles (one face normal per triangle).
+    private static func buildEntityBuffer(device: MTLDevice, mesh: Mesh) -> (buf: MTLBuffer, count: Int)? {
+        let base = SIMD4<Float>(mesh.color.0 / 255, mesh.color.1 / 255, mesh.color.2 / 255, 1)
+        var verts = [EntityVertex]()
+        for f in mesh.faces {
+            let a = SIMD3<Float>(mesh.verts[f.0].0, mesh.verts[f.0].1, mesh.verts[f.0].2)
+            let b = SIMD3<Float>(mesh.verts[f.1].0, mesh.verts[f.1].1, mesh.verts[f.1].2)
+            let c = SIMD3<Float>(mesh.verts[f.2].0, mesh.verts[f.2].1, mesh.verts[f.2].2)
+            let n = simd_normalize(simd_cross(b - a, c - a))
+            verts.append(EntityVertex(pos: a, normal: n, color: base))
+            verts.append(EntityVertex(pos: b, normal: n, color: base))
+            verts.append(EntityVertex(pos: c, normal: n, color: base))
+        }
+        guard let buf = device.makeBuffer(bytes: verts, length: verts.count * MemoryLayout<EntityVertex>.stride)
+        else { return nil }
+        return (buf, verts.count)
     }
 
     /// Sample a `patchN`-cell window of the (wrapping) heightmap around `center`
@@ -450,7 +559,8 @@ final class MeshTerrainRenderer {
 
     /// Encode one frame into `colorTex`. Returns the command buffer (caller may
     /// add a blit/present and commit, or commit + wait for headless readback).
-    func encode(camera: Camera6DOF) -> MTLCommandBuffer? {
+    /// `entities` are craft to draw (kind + world transform), depth-tested.
+    func encode(camera: Camera6DOF, entities: [(kind: EnemyKind, model: simd_float4x4)] = []) -> MTLCommandBuffer? {
         let aspect = Float(width) / Float(height)
         let view = camera.viewMatrix()
         let proj = camera.projectionMatrix(aspect: aspect)
@@ -493,13 +603,30 @@ final class MeshTerrainRenderer {
         enc.setVertexBuffer(markerVBuf, offset: 0, index: 0)
         enc.drawIndexedPrimitives(type: .triangle, indexCount: markerIndexCount,
                                   indexType: .uint32, indexBuffer: markerIBuf, indexBufferOffset: 0)
+
+        // Craft (depth-tested, lit, distance-faded).
+        if !entities.isEmpty {
+            var eu = EntityUniforms(vp: vp, model: matrix_identity_float4x4,
+                                    eye: SIMD4<Float>(camera.position, 1),
+                                    light: SIMD4<Float>(simd_normalize(SIMD3<Float>(-1, 0.35, 0.9)), 0),
+                                    fog: SIMD4<Float>(worldHalf * 0.45, worldHalf * 0.82, 0, 0))
+            enc.setRenderPipelineState(entityPipeline)
+            enc.setDepthStencilState(meshDepth)
+            for (kind, model) in entities {
+                guard let eb = entityBuffers[kind] else { continue }
+                eu.model = model
+                enc.setVertexBytes(&eu, length: MemoryLayout<EntityUniforms>.stride, index: 1)
+                enc.setVertexBuffer(eb.buf, offset: 0, index: 0)
+                enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: eb.count)
+            }
+        }
         enc.endEncoding()
         return cmd
     }
 
     /// Render one frame and read the colour texture back as RGB bytes (headless).
-    func renderToRGB(camera: Camera6DOF) -> [UInt8] {
-        guard let cmd = encode(camera: camera) else { return [] }
+    func renderToRGB(camera: Camera6DOF, entities: [(kind: EnemyKind, model: simd_float4x4)] = []) -> [UInt8] {
+        guard let cmd = encode(camera: camera, entities: entities) else { return [] }
         cmd.commit(); cmd.waitUntilCompleted()
         var rgba = [UInt8](repeating: 0, count: width * height * 4)
         colorTex.getBytes(&rgba, bytesPerRow: width * 4,
@@ -578,6 +705,15 @@ enum Spike6DOF {
         hcam.rotateBody(pitch: -0.6, yaw: 0, roll: 0)
         r.recenterIfNeeded(around: hcam.position, sync: true)
         writePPM(r.renderToRGB(camera: hcam), w: w, h: h, path: "/tmp/strataris_6dof_highalt.ppm")
+
+        // Enemy craft: spawn a field and render the cluster, depth-tested.
+        let field = EnemyField(terrain: terrain, around: 512, cy: 512)
+        let ents = field.enemies.map { (kind: $0.kind, model: enemyModel($0, scale: field.scale(for: $0.kind))) }
+        let egz = terrain.heightF(512, 360)
+        var ecam = Camera6DOF.start(position: SIMD3(512, 360, egz + 70))
+        ecam.rotateBody(pitch: -0.1, yaw: 0, roll: 0)
+        r.recenterIfNeeded(around: ecam.position, sync: true)
+        writePPM(r.renderToRGB(camera: ecam, entities: ents), w: w, h: h, path: "/tmp/strataris_6dof_enemies.ppm")
 
         // Rough timing (GPU fill is trivial at 480×270; this is a sanity floor).
         let t0 = CACurrentMediaTime()
@@ -664,6 +800,7 @@ fragment float4 f_blit(VSOut in [[stage_in]], texture2d<float> tex [[texture(0)]
 final class Spike6DOFController: NSObject, MTKViewDelegate {
     private let renderer: MeshTerrainRenderer
     private let terrain: Terrain
+    private let enemies: EnemyField
     private var camera: Camera6DOF
     private weak var view: Spike6DOFView?
     private let blitQueue: MTLCommandQueue
@@ -680,6 +817,7 @@ final class Spike6DOFController: NSObject, MTKViewDelegate {
         self.renderer = r
         self.blitQueue = q
         self.view = view
+        self.enemies = EnemyField(terrain: terrain, around: 512, cy: 512)
         let g = terrain.heightF(512, 600)
         self.camera = Camera6DOF.start(position: SIMD3(512, 600, g + 90))
         super.init()
@@ -714,19 +852,19 @@ final class Spike6DOFController: NSObject, MTKViewDelegate {
         if !k.toggleMode { modeLatch = false }
 
         let pitchIn = (k.pitchUp ? 1 : 0) - (k.pitchDown ? 1 : 0)
-        // Left-positive so → keypress banks/rolls right (matches the keypress).
-        let bankIn  = (k.rollLeft ? 1 : 0) - (k.rollRight ? 1 : 0)
+        let rollIn  = (k.rollRight ? 1 : 0) - (k.rollLeft ? 1 : 0)   // right-positive
         if camera.mode == .restricted {
             // Arrows bank-and-turn (L/R) and pitch (U/D), clamped envelope.
-            camera.flyRestricted(turn: Float(bankIn), pitchIn: Float(pitchIn), dt: dt)
+            camera.flyRestricted(turn: Float(-rollIn), pitchIn: Float(pitchIn), dt: dt)
         } else {
             // Full 6DOF: arrows roll/pitch, A/D yaw. Hands-off → ease back to level.
             let yaw = (k.yawLeft ? 1 : 0) - (k.yawRight ? 1 : 0)
-            if pitchIn == 0 && bankIn == 0 && yaw == 0 {
+            if pitchIn == 0 && rollIn == 0 && yaw == 0 {
                 camera.autoLevelFull(dt: dt)
             } else {
-                camera.flyFull(pitch: Float(pitchIn), yaw: Float(yaw), roll: Float(bankIn), dt: dt)
+                camera.flyFull(pitch: Float(pitchIn), yaw: Float(yaw), roll: Float(rollIn), dt: dt)
             }
+            camera.bankToTurn(dt: dt)        // banking changes heading, like an aircraft
         }
         if k.resetLevel {                              // Space → recover to level flight
             camera.setMode(.restricted)
@@ -745,7 +883,10 @@ final class Spike6DOFController: NSObject, MTKViewDelegate {
 
         renderer.recenterIfNeeded(around: camera.position)
 
-        guard let cmd = renderer.encode(camera: camera) else { return }
+        let ents = enemies.enemies.map {
+            (kind: $0.kind, model: enemyModel($0, scale: enemies.scale(for: $0.kind)))
+        }
+        guard let cmd = renderer.encode(camera: camera, entities: ents) else { return }
         if let drawable = mtkView.currentDrawable,
            let pass = mtkView.currentRenderPassDescriptor,
            let pipe = blitPipeline,
