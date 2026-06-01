@@ -115,9 +115,21 @@ final class MeshTerrainRenderer {
     let colorTex: MTLTexture
     private let depthTex: MTLTexture
 
-    private let vbuf: MTLBuffer
+    // Streaming terrain patch: a fixed-size grid that recenters on the camera as
+    // it flies. The heightmap wraps (Terrain & mask), so re-sampling a moving
+    // window gives seamless, edgeless terrain in every direction.
+    private let terrain: Terrain
+    private let patchN: Int                 // cells per side
+    private let vertsPerSide: Int           // patchN + 1
+    let patchHalf: Float                    // world half-extent (for fog tuning)
+    private let recenterStep: Int           // rebuild once the camera drifts this many cells
     private let ibuf: MTLBuffer
     private let indexCount: Int
+    private var vbufs: [MTLBuffer]          // pool, cycled so an in-flight frame isn't overwritten
+    private var activeVB = 0
+    private var centerCell: SIMD2<Int>
+    private var building = false
+    private let buildQueue = DispatchQueue(label: "cc.jorviksoftware.strataris.meshbuild")
 
     private let markerVBuf: MTLBuffer
     private let markerIBuf: MTLBuffer
@@ -130,7 +142,9 @@ final class MeshTerrainRenderer {
     struct MeshU { float4x4 mvp; float4 eye; float4 fogColor; float4 fogParams; };
 
     struct VIn  { float3 pos [[attribute(0)]]; float4 col [[attribute(1)]]; };
-    struct VOut { float4 position [[position]]; float4 color; float fogT; };
+    // `flat` colour → no Gouraud blend, so the terrain reads chunky and banded
+    // like the voxel renderer's per-cell shading rather than smooth-interpolated.
+    struct VOut { float4 position [[position]]; float4 color [[flat]]; float fogT; };
 
     vertex VOut v_mesh(VIn in [[stage_in]], constant MeshU& u [[buffer(1)]]) {
         VOut o;
@@ -141,7 +155,7 @@ final class MeshTerrainRenderer {
         return o;
     }
     fragment float4 f_mesh(VOut in [[stage_in]], constant MeshU& u [[buffer(1)]]) {
-        float3 c = mix(in.color.rgb, u.fogColor.rgb, in.fogT * 0.9);
+        float3 c = mix(in.color.rgb, u.fogColor.rgb, in.fogT);   // full fog at the patch edge
         return float4(c, 1.0);
     }
 
@@ -173,10 +187,16 @@ final class MeshTerrainRenderer {
     """
 
     init?(device: MTLDevice, terrain: Terrain, width: Int, height: Int,
-          patchCells: Int = 256, patchCenterX: Int = 512, patchCenterY: Int = 512) {
+          patchCells: Int = 640, patchCenterX: Int = 512, patchCenterY: Int = 512) {
         self.device = device
         self.width = width
         self.height = height
+        self.terrain = terrain
+        self.patchN = patchCells
+        self.vertsPerSide = patchCells + 1
+        self.patchHalf = Float(patchCells) / 2
+        self.recenterStep = max(8, patchCells / 8)
+        self.centerCell = SIMD2<Int>(patchCenterX, patchCenterY)
         guard let q = device.makeCommandQueue() else { return nil }
         self.queue = q
 
@@ -229,21 +249,9 @@ final class MeshTerrainRenderer {
         guard let dt = device.makeTexture(descriptor: ddesc) else { return nil }
         self.depthTex = dt
 
-        // Build the terrain patch mesh from the heightmap.
+        // Index buffer — fixed grid topology, built once and reused as the patch
+        // recenters (only the vertex positions/colours change).
         let n = patchCells
-        let x0 = patchCenterX - n / 2, y0 = patchCenterY - n / 2
-        var verts = [MeshVertex](); verts.reserveCapacity((n + 1) * (n + 1))
-        for j in 0...n {
-            let wy = Float(y0 + j)
-            for i in 0...n {
-                let wx = Float(x0 + i)
-                let h = terrain.heightF(wx, wy)
-                let c = terrain.colorAt(wx, wy)
-                let col = SIMD4<Float>(Float(c & 0xFF) / 255, Float((c >> 8) & 0xFF) / 255,
-                                       Float((c >> 16) & 0xFF) / 255, 1)
-                verts.append(MeshVertex(pos: SIMD3(wx, wy, h), color: col))
-            }
-        }
         var idx = [UInt32](); idx.reserveCapacity(n * n * 6)
         let row = UInt32(n + 1)
         for j in 0..<n {
@@ -254,10 +262,22 @@ final class MeshTerrainRenderer {
             }
         }
         self.indexCount = idx.count
-        guard let vb = device.makeBuffer(bytes: verts, length: verts.count * MemoryLayout<MeshVertex>.stride),
-              let ib = device.makeBuffer(bytes: idx, length: idx.count * MemoryLayout<UInt32>.stride)
+        guard let ib = device.makeBuffer(bytes: idx, length: idx.count * MemoryLayout<UInt32>.stride)
         else { return nil }
-        self.vbuf = vb; self.ibuf = ib
+        self.ibuf = ib
+
+        // Pool of vertex buffers (cycled so a build never overwrites the buffer
+        // a frame is still reading). Fill the first with the start window.
+        let vcap = (n + 1) * (n + 1) * MemoryLayout<MeshVertex>.stride
+        var pool = [MTLBuffer]()
+        for _ in 0..<3 {
+            guard let b = device.makeBuffer(length: vcap, options: .storageModeShared) else { return nil }
+            pool.append(b)
+        }
+        self.vbufs = pool
+        let verts0 = MeshTerrainRenderer.buildVertices(terrain: terrain, patchN: n,
+                                                       center: SIMD2<Int>(patchCenterX, patchCenterY))
+        verts0.withUnsafeBytes { raw in pool[0].contents().copyMemory(from: raw.baseAddress!, byteCount: raw.count) }
 
         // A single bright marker object (a small pyramid) sitting on the terrain,
         // to confirm depth occlusion against the hills in the same pass.
@@ -281,6 +301,53 @@ final class MeshTerrainRenderer {
               let mib = device.makeBuffer(bytes: &midx, length: midx.count * MemoryLayout<UInt32>.stride)
         else { return nil }
         self.markerVBuf = mvb; self.markerIBuf = mib
+    }
+
+    /// Sample a `patchN`-cell window of the (wrapping) heightmap around `center`
+    /// into world-space vertices. Static so it's safe to call off the main thread.
+    private static func buildVertices(terrain: Terrain, patchN n: Int, center: SIMD2<Int>) -> [MeshVertex] {
+        let x0 = center.x - n / 2, y0 = center.y - n / 2
+        var verts = [MeshVertex](); verts.reserveCapacity((n + 1) * (n + 1))
+        for j in 0...n {
+            let wy = Float(y0 + j)
+            for i in 0...n {
+                let wx = Float(x0 + i)
+                let h = terrain.heightF(wx, wy)
+                let c = terrain.colorAt(wx, wy)
+                let col = SIMD4<Float>(Float(c & 0xFF) / 255, Float((c >> 8) & 0xFF) / 255,
+                                       Float((c >> 16) & 0xFF) / 255, 1)
+                verts.append(MeshVertex(pos: SIMD3(wx, wy, h), color: col))
+            }
+        }
+        return verts
+    }
+
+    private func swapIn(_ verts: [MeshVertex], center: SIMD2<Int>) {
+        let next = (activeVB + 1) % vbufs.count
+        verts.withUnsafeBytes { raw in
+            vbufs[next].contents().copyMemory(from: raw.baseAddress!, byteCount: raw.count)
+        }
+        activeVB = next; centerCell = center; building = false
+    }
+
+    /// Recenter the patch on the camera once it drifts past `recenterStep` cells.
+    /// Async (default): rebuild on a background queue, swap on the main thread.
+    /// `sync: true` rebuilds inline (headless capture has no run loop to drain
+    /// the main queue). Terrain wraps, so this never hits an edge.
+    func recenterIfNeeded(around pos: SIMD3<Float>, sync: Bool = false) {
+        if building { return }
+        let cell = SIMD2<Int>(Int(pos.x.rounded()), Int(pos.y.rounded()))
+        if max(abs(cell.x - centerCell.x), abs(cell.y - centerCell.y)) < recenterStep { return }
+        building = true
+        if sync {
+            swapIn(MeshTerrainRenderer.buildVertices(terrain: terrain, patchN: patchN, center: cell), center: cell)
+            return
+        }
+        let n = patchN, terrain = self.terrain
+        buildQueue.async { [weak self] in
+            let verts = MeshTerrainRenderer.buildVertices(terrain: terrain, patchN: n, center: cell)
+            DispatchQueue.main.async { self?.swapIn(verts, center: cell) }
+        }
     }
 
     /// Encode one frame into `colorTex`. Returns the command buffer (caller may
@@ -312,15 +379,17 @@ final class MeshTerrainRenderer {
         enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
 
         // Terrain + marker (depth-tested).
+        // Fog fades terrain into the horizon colour before the patch edge, so the
+        // seam where the mesh stops is hidden (the sky uses the same horizon hue).
         var u = MeshUniforms(mvp: vp,
                              eye: SIMD4<Float>(camera.position, 1),
                              fogColor: SIMD4<Float>(0.62, 0.74, 0.86, 1),
-                             fogParams: SIMD4<Float>(camera.far * 0.45, camera.far * 0.95, 0, 0))
+                             fogParams: SIMD4<Float>(patchHalf * 0.55, patchHalf * 0.92, 0, 0))
         enc.setRenderPipelineState(meshPipeline)
         enc.setDepthStencilState(meshDepth)
         enc.setVertexBytes(&u, length: MemoryLayout<MeshUniforms>.stride, index: 1)
         enc.setFragmentBytes(&u, length: MemoryLayout<MeshUniforms>.stride, index: 1)
-        enc.setVertexBuffer(vbuf, offset: 0, index: 0)
+        enc.setVertexBuffer(vbufs[activeVB], offset: 0, index: 0)
         enc.drawIndexedPrimitives(type: .triangle, indexCount: indexCount,
                                   indexType: .uint32, indexBuffer: ibuf, indexBufferOffset: 0)
         enc.setVertexBuffer(markerVBuf, offset: 0, index: 0)
@@ -375,6 +444,21 @@ enum Spike6DOF {
             writePPM(rgb, w: w, h: h, path: "/tmp/strataris_6dof_\(name).ppm")
         }
 
+        // Streaming check: advance horizontally a long way (past the 4096 wrap),
+        // holding altitude above the terrain and looking down for a vista, while
+        // recentering the patch. Every frame should still have terrain that fades
+        // into fog — no hard edge, since the heightmap tiles.
+        var py: Float = 560
+        for step in 0..<6 {
+            py -= 950
+            let gz = terrain.heightF(512, py)
+            var fcam = Camera6DOF.start(position: SIMD3(512, py, gz + 110))
+            fcam.rotateBody(pitch: -0.45, yaw: 0, roll: 0)    // ~26° nose-down
+            r.recenterIfNeeded(around: fcam.position, sync: true)
+            let rgb = r.renderToRGB(camera: fcam)
+            writePPM(rgb, w: w, h: h, path: "/tmp/strataris_6dof_flight\(step).ppm")
+        }
+
         // Rough timing (GPU fill is trivial at 480×270; this is a sanity floor).
         let t0 = CACurrentMediaTime()
         let frames = 120
@@ -384,7 +468,7 @@ enum Spike6DOF {
             _ = r.renderToRGB(camera: cam)        // includes a CPU readback + wait each frame
         }
         let ms = (CACurrentMediaTime() - t0) * 1000 / Double(frames)
-        print(String(format: "6DOF: wrote 6 orientation PPMs to /tmp; ~%.2f ms/frame incl. readback+wait", ms))
+        print(String(format: "6DOF: wrote 6 orientation + 6 flight PPMs to /tmp; ~%.2f ms/frame incl. readback+wait", ms))
     }
 
     private static func writePPM(_ rgb: [UInt8], w: Int, h: Int, path: String) {
@@ -506,6 +590,7 @@ final class Spike6DOFController: NSObject, MTKViewDelegate {
         if k.faster { speed = min(420, speed + 160 * dt) }
         if k.slower { speed = max(0, speed - 160 * dt) }
         camera.position += camera.forward * speed * dt
+        renderer.recenterIfNeeded(around: camera.position)
 
         guard let cmd = renderer.encode(camera: camera) else { return }
         if let drawable = mtkView.currentDrawable,
