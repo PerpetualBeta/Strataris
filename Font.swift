@@ -13,14 +13,14 @@ enum Font {
 
     static func draw(_ text: String, into fb: UnsafeMutablePointer<UInt32>, w: Int, h: Int,
                      x: Int, y: Int, scale: Int = 1, color: UInt32,
-                     shadow: UInt32? = packRGBA(0, 0, 0)) {
+                     shadow: UInt32? = packRGBA(0, 0, 0), alpha: Float = 1) {
         var penX = x
         for ch in text.uppercased() {
             let glyph = glyphs[ch] ?? glyphs[" "]!
             if let sh = shadow {
-                blit(glyph, into: fb, w: w, h: h, x: penX + scale, y: y + scale, scale: scale, color: sh)
+                blit(glyph, into: fb, w: w, h: h, x: penX + scale, y: y + scale, scale: scale, color: sh, alpha: alpha)
             }
-            blit(glyph, into: fb, w: w, h: h, x: penX, y: y, scale: scale, color: color)
+            blit(glyph, into: fb, w: w, h: h, x: penX, y: y, scale: scale, color: color, alpha: alpha)
             penX += (cellW + 1) * scale
         }
     }
@@ -30,8 +30,18 @@ enum Font {
         return text.count * (cellW + 1) * scale
     }
 
+    /// Mix `color` over `under` by `a` (0–1) in the packed-RGBA layout.
+    @inline(__always) private static func mix(_ under: UInt32, _ color: UInt32, _ a: Float) -> UInt32 {
+        let ia = 1 - a
+        let r = UInt32(Float(under & 0xFF) * ia + Float(color & 0xFF) * a)
+        let g = UInt32(Float((under >> 8) & 0xFF) * ia + Float((color >> 8) & 0xFF) * a)
+        let b = UInt32(Float((under >> 16) & 0xFF) * ia + Float((color >> 16) & 0xFF) * a)
+        return r | (g << 8) | (b << 16) | 0xFF00_0000
+    }
+
     private static func blit(_ glyph: [UInt8], into fb: UnsafeMutablePointer<UInt32>, w: Int, h: Int,
-                             x: Int, y: Int, scale: Int, color: UInt32) {
+                             x: Int, y: Int, scale: Int, color: UInt32, alpha: Float = 1) {
+        let opaque = alpha >= 1
         for row in 0..<cellH {
             let bits = glyph[row]
             for col in 0..<cellW {
@@ -42,7 +52,9 @@ enum Font {
                     let base = py * w
                     for sx in 0..<scale {
                         let px = x + col * scale + sx
-                        if px >= 0 && px < w { fb[base + px] = color }
+                        if px >= 0 && px < w {
+                            fb[base + px] = opaque ? color : mix(fb[base + px], color, alpha)
+                        }
                     }
                 }
             }

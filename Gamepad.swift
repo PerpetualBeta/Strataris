@@ -195,6 +195,10 @@ final class Gamepad {
         var c = InputState.Controls()
         if lx < -deadzone { c.bankLeft = true }
         if lx >  deadzone { c.bankRight = true }
+        // Right stick X = yaw (full 6DOF only; ignored in the restricted envelope).
+        let rx = gp.rightThumbstick.xAxis.value
+        if rx < -deadzone { c.yawLeft = true }
+        if rx >  deadzone { c.yawRight = true }
         // Up on the stick matches the Up-arrow (nose down) unless inverted.
         let py = invertPitch ? -ly : ly
         if py >  deadzone { c.climb = true }

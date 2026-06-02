@@ -77,6 +77,10 @@ final class Renderer: NSObject, MTKViewDelegate {
     private var mesh: MeshTerrainRenderer?
     private let useMesh: Bool
     private var camera6 = Camera6DOF.start(position: SIMD3<Float>(512, 512, 200))
+    /// Smoothed scope heading for the radar: full-6DOF maneuvers can whip (steep
+    /// bank) or flip (over the top of a loop) the raw ground heading; the scope
+    /// eases toward it by shortest arc instead, and holds it while near-vertical.
+    private var radarHeading: Float = 0
 
     private var lastTime: CFTimeInterval = 0
     private var state: GameState = .title
@@ -88,6 +92,8 @@ final class Renderer: NSObject, MTKViewDelegate {
     private var level = 1               // progression: starts at 1, +1 each warp (unbounded)
     private var paused = false
     private var restartLatch = false
+    private var gameOverDwell: Float = 0    // seconds before the game-over screen accepts input
+    private var wonTime: Float = 0          // time on the PLANET CLEARED screen (banner fade)
     private var pauseLatch = false
     private var warpLatch = false
     private var briefingLatch = false
@@ -126,6 +132,9 @@ final class Renderer: NSObject, MTKViewDelegate {
     private var hasTargetingComputer: Bool { level >= 6 }
     private var hasCloak: Bool { level >= 9 }
     private var hasRadialPulse: Bool { level >= 12 }
+    /// Full 6DOF (loops, rolls, yaw). Mesh renderer only — the voxel raycaster
+    /// is physically yaw-only, so the perk never engages on the fallback.
+    private var hasAxisUnlock: Bool { level >= 3 && useMesh }
     private var pulseCharges = 0                // radial pulse: granted at level 12
     private var targetLockId: Int? = nil        // targeting computer: locked craft (stable id)
     private var cloakActive: Float = 0          // seconds of cloak remaining (>0 = cloaked)
@@ -240,6 +249,13 @@ final class Renderer: NSObject, MTKViewDelegate {
 
         super.init()
         resetCamera6(over: terrain)
+
+        // Dev aid: STRATARIS_LEVEL=n launches the first run at level n (perk
+        // fly-testing without clearing planets). Restarts return to level 1.
+        if let n = ProcessInfo.processInfo.environment["STRATARIS_LEVEL"].flatMap({ Int($0) }), n > 1 {
+            level = n
+            loadPlanet(n)
+        }
     }
 
     func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
@@ -344,6 +360,7 @@ final class Renderer: NSObject, MTKViewDelegate {
     /// N" becomes usable on planet N. One-time per level (level only increments).
     private func unlockPerks(reaching lvl: Int) {
         switch lvl {
+        case 3:  if useMesh { notify("AXIS UNLOCK — FULL MANEUVERING") }
         case 6:  notify("TARGETING COMPUTER ONLINE")
         case 9:  notify("CLOAKING DEVICE ONLINE"); cloakActive = 0; cloakCooldown = 0
         case 12: pulseCharges = 3; notify("RADIAL PULSE ARMED")
@@ -371,26 +388,53 @@ final class Renderer: NSObject, MTKViewDelegate {
         let g = t.heightF(512, 512)
         camera6 = Camera6DOF.start(position: SIMD3<Float>(512, 512, g + 90))
         camera6.speed = 90
+        radarHeading = camera6.groundHeading
     }
 
     /// Authoritative flight in mesh mode: the proven spike model — fly along the
-    /// real forward vector through a quaternion camera (restricted envelope:
-    /// coordinated bank-turn, clamped pitch, auto-level on release). The legacy
-    /// `Camera` is then synced FROM this so the HUD, radar, enemy AI and engine
-    /// audio keep reading it unchanged.
+    /// real forward vector through a quaternion camera. Levels 1–2 use the
+    /// restricted envelope (coordinated bank-turn, clamped pitch, auto-level on
+    /// release); from level 3 the Axis Unlock perk opens the full envelope
+    /// (free roll/pitch + a yaw axis — loops and rolls, auto-level hands-off).
+    /// The legacy `Camera` is then synced FROM this so the HUD, radar, enemy AI
+    /// and engine audio keep reading it unchanged.
     private func updateMeshFlight(dt: Float) {
         // Throttle.
         if input.faster { camera6.speed = min(meshThrottle.max, camera6.speed + meshThrottle.accel * dt) }
         if input.slower { camera6.speed = max(meshThrottle.min, camera6.speed - meshThrottle.accel * dt) }
 
-        // Steer (coordinated bank-turn) + pitch (clamped). The `climb` field is
-        // nose-down/descend, `dive` is nose-up/climb (GameView/Gamepad already fold
-        // in the Invert-pitch setting), so pitchIn>0 = nose down to match flyRestricted.
+        // Envelope tracks the perk (a pure function of level, so it resets with
+        // the run); setMode keeps the view continuous across the switch.
+        camera6.setMode(hasAxisUnlock ? .full : .restricted)
+
+        // The `climb` field is nose-down/descend, `dive` is nose-up/climb
+        // (GameView/Gamepad already fold in the Invert-pitch setting), and
+        // flyRestricted/flyFull's positive pitch is nose-UP → pitchIn = dive − climb.
         let turn = (input.bankLeft ? 1 : 0) - (input.bankRight ? 1 : 0)
-        // flyRestricted's positive pitch is nose-UP, and `dive` is the climb/nose-up
-        // field (`climb` is descend, matching Camera.update), so pitchIn = dive − climb.
         let pitchIn = (input.dive ? 1 : 0) - (input.climb ? 1 : 0)
-        camera6.flyRestricted(turn: Float(turn), pitchIn: Float(pitchIn), dt: dt)
+
+        // Flight envelope trim (Settings): multipliers on the tuned handling rates.
+        let trim = GameSettings.shared
+        let agility = trim.trimAgility, autoLevel = trim.trimAutoLevel
+
+        if camera6.mode == .full {
+            // Full 6DOF (Axis Unlock): left/right roll, up/down pitch, A/D (or
+            // right stick) yaw. Hands-off eases back upright from any attitude
+            // (even inverted); banking still turns like an aircraft.
+            let yaw = (input.yawLeft ? 1 : 0) - (input.yawRight ? 1 : 0)
+            if turn == 0 && pitchIn == 0 && yaw == 0 {
+                camera6.autoLevelFull(dt: dt, rate: 1.6 * autoLevel)
+            } else {
+                camera6.flyFull(pitch: Float(pitchIn), yaw: Float(yaw), roll: Float(-turn), dt: dt,
+                                rate: 1.9 * agility, yawRate: 1.1 * trim.trimYaw)
+            }
+            camera6.bankToTurn(dt: dt)
+        } else {
+            // Restricted (levels 1–2): coordinated bank-turn + clamped pitch.
+            camera6.flyRestricted(turn: Float(turn), pitchIn: Float(pitchIn), dt: dt,
+                                  yawRate: 1.4 * agility, pitchRate: 1.4 * agility,
+                                  levelRate: 2.5 * autoLevel)
+        }
 
         // Fly along the real facing, so pitching the nose actually climbs/dives.
         camera6.position += camera6.forward * camera6.speed * dt
@@ -399,6 +443,18 @@ final class Renderer: NSObject, MTKViewDelegate {
         let ground = terrain.heightF(camera6.position.x, camera6.position.y)
         camera6.position.z = max(camera6.position.z, ground + meshClearance)
         camera6.position.z = min(camera6.position.z, 460)
+
+        // Ease the radar's scope heading toward the true ground heading (shortest
+        // arc, ~0.1 s time constant — imperceptible in restricted flight, steadies
+        // the scope through full-6DOF rolls/loops). Hold while near-vertical: the
+        // facing has no usable ground component there, so the heading is noise.
+        let fwd = camera6.forward
+        if fwd.x * fwd.x + fwd.y * fwd.y > 0.0025 {
+            var d = camera6.groundHeading - radarHeading
+            while d > .pi { d -= 2 * .pi }
+            while d < -.pi { d += 2 * .pi }
+            radarHeading += d * min(1, dt * 10)
+        }
 
         // Sync the legacy camera for everything that still reads it.
         camera.x = camera6.position.x
@@ -409,9 +465,10 @@ final class Renderer: NSObject, MTKViewDelegate {
         // Attitude dial: drawAttitude exaggerates bank ×3 (tuned for the voxel
         // build's tiny cosmetic roll), so pre-divide to show the TRUE bank angle —
         // it should read the same tilt as the 3D horizon. Pitch maps the ±0.5 rad
-        // envelope onto the dial's ±80 scale.
+        // envelope onto the dial's ±80 scale (clamped: full-6DOF pitch can exceed
+        // the dial's range — a flat dial is best-effort near vertical/inverted).
         camera.roll = camera6.bankAngle / 3
-        camera.pitch = camera6.pitchAngle / 0.5 * 80
+        camera.pitch = max(-80, min(80, camera6.pitchAngle / 0.5 * 80))
     }
 
     /// Re-express a world position in the camera's wrap neighbourhood: the map
@@ -703,6 +760,15 @@ final class Renderer: NSObject, MTKViewDelegate {
     private func onGameOver() {
         state = .lost
         audio.gameOver()
+        // Arm the edge latches: you usually die with fire still held, and with
+        // "fire also starts/restarts" that would skip the game-over screen on the
+        // very next frame. Held controls must be RELEASED before they can act.
+        restartLatch = true
+        backLatch = true
+        // …and you're usually still TAPPING fire in the heat of the moment, so a
+        // released-then-pressed fire would skip it too. Hold the screen for a
+        // moment before it accepts any input (classic arcade game-over dwell).
+        gameOverDwell = 1.2
         newScoreRank = -1
         if highScores.qualifies(combat.score) {
             awaitingName = true
@@ -1028,7 +1094,8 @@ final class Renderer: NSObject, MTKViewDelegate {
             } else if structures.structures.count > 0 && structures.standing == 0 {
                 loseReason = "BASES LOST"; onGameOver()
             } else if enemies.remaining == 0 {
-                state = .won; audio.planetCleared()
+                state = .won; audio.planetCleared(); wonTime = 0
+                warpLatch = true; restartLatch = true   // a held warp/fire mustn't skip the screen
                 comms.say("Attack fleet defeated")
                 combat.clearTransient()                 // clear last laser/explosion
                 projectiles = ProjectileField()         // and any in-flight ordnance
@@ -1053,7 +1120,8 @@ final class Renderer: NSObject, MTKViewDelegate {
                 beginWarp()                     // cinematic + async next-planet gen
             }
         } else if state == .lost {
-            if input.restart && !restartLatch {
+            gameOverDwell = max(0, gameOverDwell - dt)
+            if gameOverDwell <= 0 && input.restart && !restartLatch {
                 restartLatch = true
                 level = 1
                 combat = Combat()               // game over — fresh run
@@ -1064,7 +1132,7 @@ final class Renderer: NSObject, MTKViewDelegate {
             // Esc on the high-score table backs out to the title screen. (During
             // name entry the key system swallows Esc, so this only fires once the
             // table is showing — exactly when the player expects it.)
-            if input.back && !backLatch && !awaitingName {
+            if gameOverDwell <= 0 && input.back && !backLatch && !awaitingName {
                 backLatch = true
                 returnToTitle()
             }
@@ -1132,11 +1200,14 @@ final class Renderer: NSObject, MTKViewDelegate {
                           shield: Int(shield), maxShield: Int(maxShield),
                           roll: camera.roll, pitch: camera.pitch)
         if useMesh {
-            // Feed the radar the quaternion camera's actual ground basis so blips
-            // aren't mirrored (its handedness differs from the voxel yaw convention).
-            let f = camera6.forward, r = camera6.right
+            // Scope basis from the SMOOTHED ground heading (not the raw camera
+            // basis): at steep bank/pitch the basis vectors' ground projections
+            // collapse and whip around — deriving an orthonormal basis from one
+            // eased heading keeps the scope steady through rolls and loops.
+            // Handedness matches camera6's (at heading 0: fwd (0,-1), right (-1,0)).
+            let fx = -sinf(radarHeading), fy = -cosf(radarHeading)
             voxel.drawRadar(originX: camera6.position.x, originY: camera6.position.y,
-                            fwdX: f.x, fwdY: f.y, rightX: r.x, rightY: r.y,
+                            fwdX: fx, fwdY: fy, rightX: fy, rightY: -fx,
                             enemies: enemies, structures: structures)
         } else {
             voxel.drawRadar(camera: camera, enemies: enemies, structures: structures)
@@ -1165,8 +1236,13 @@ final class Renderer: NSObject, MTKViewDelegate {
                 let warpPrompt = gamepad.connected
                     ? "\(Gamepad.friendlyName(gamepad.binding(for: .warp))) / R TO WARP"
                     : "PRESS R TO WARP"
+                // After 10 s the banner ghosts down so the player can free-fly the
+                // cleared world with a clear view.
+                wonTime += dt
+                let fade: Float = wonTime < 10 ? 1 : max(0.1, 1 - (wonTime - 10) * 0.9)  // → 0.1 over 1 s
                 voxel.drawBanner(title: "\(PlanetTheme.name(forLevel: level).uppercased()) SECURED",
-                                 subtitle: "LEVEL \(level) CLEAR    \(warpPrompt)")
+                                 subtitle: "LEVEL \(level) CLEAR    \(warpPrompt)",
+                                 opacity: fade)
             case .playing, .title, .briefing, .codex, .warping:
                 break
             }

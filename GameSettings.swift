@@ -21,6 +21,9 @@ final class GameSettings {
         static let fireConfirms = "fireConfirms"
         static let leftWarp    = "leftWarp"
         static let padBindings = "padBindings"
+        static let trimAgility   = "trimAgility"
+        static let trimYaw       = "trimYaw"
+        static let trimAutoLevel = "trimAutoLevel"
     }
 
     private init() {
@@ -32,6 +35,9 @@ final class GameSettings {
             Key.deadzone:    0.25,
             Key.fireConfirms: true,
             Key.leftWarp:    true,
+            Key.trimAgility:   1.0,
+            Key.trimYaw:       1.0,
+            Key.trimAutoLevel: 1.0,
         ])
     }
 
@@ -45,6 +51,13 @@ final class GameSettings {
     var deadzone: Float    { get { d.float(forKey: Key.deadzone) }    set { d.set(newValue, forKey: Key.deadzone) } }
     var fireConfirms: Bool { get { d.bool(forKey: Key.fireConfirms) } set { d.set(newValue, forKey: Key.fireConfirms) } }
     var leftWarp: Bool     { get { d.bool(forKey: Key.leftWarp) }     set { d.set(newValue, forKey: Key.leftWarp) } }
+
+    // Flight envelope trim — multipliers on the 6DOF handling rates (1 = the
+    // tuned defaults). Agility scales pitch/roll, yaw scales the full-envelope
+    // yaw axis, autoLevel scales the hands-off recovery (0 = hold attitude).
+    var trimAgility: Float   { get { d.float(forKey: Key.trimAgility) }   set { d.set(newValue, forKey: Key.trimAgility) } }
+    var trimYaw: Float       { get { d.float(forKey: Key.trimYaw) }       set { d.set(newValue, forKey: Key.trimYaw) } }
+    var trimAutoLevel: Float { get { d.float(forKey: Key.trimAutoLevel) } set { d.set(newValue, forKey: Key.trimAutoLevel) } }
 
     // Controller button rebinds: [PadAction.rawValue: control name]. Empty until
     // the player changes something; Gamepad falls back to per-action defaults.
