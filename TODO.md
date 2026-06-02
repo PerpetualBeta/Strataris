@@ -22,15 +22,12 @@ Deferred items, not yet scheduled. Pick from here when ready.
         Still to do: **product page** and **blog post** reusing the same angle.
 
 ## Scoring
-- [ ] **Stardate on high-score entries** — record a timestamp at the moment a
-      score is added, formatted `yyyymmdd::hhmm`, stored on `HighScoreEntry`
-      (Codable — make it optional / defaulted so existing highscores.json still
-      decodes) and shown as a column in the game-over high-score table.
-- [ ] **Proper columnar high-score table** — replace the current concatenated
-      single-string rows with aligned columns: **NAME | STARDATE | SCORE |
-      LEVEL**, with a header row. Needs a left-aligned Unicode draw at fixed
-      column x-positions (Core Text is proportional, so can't rely on spaces).
-      (Drop the planet "P3" suffix into the LEVEL column.)
+- [x] **Stardate on high-score entries** — done. `HighScoreEntry.stardate`
+      (`yyyymmdd::hhmm`, optional so older highscores.json still decodes),
+      shown as a column in the game-over table.
+- [x] **Proper columnar high-score table** — done. `drawGameOver` lays out
+      aligned **RANK | NAME | STARDATE | SCORE | LEVEL** columns at fixed
+      x-positions.
 
 ## Visual / polish
 - [x] **Damaged buildings emit persistent smoke and fire.** Already implemented
