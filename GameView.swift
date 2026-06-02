@@ -71,8 +71,12 @@ final class GameView: MTKView {
         switch keyCode {
         case kVK_LeftArrow:                 input.kb.bankLeft = down
         case kVK_RightArrow:                input.kb.bankRight = down
-        case kVK_UpArrow:                   input.kb.climb = down
-        case kVK_DownArrow:                 input.kb.dive = down
+        // Pitch honours the Invert-pitch setting (shared with the gamepad). Default
+        // (off) is flight-stick sense: ↑ = nose down / descend, ↓ = nose up / climb.
+        // Inverted swaps them so ↑ = climb. Map at key time so the toggle applies
+        // live without restarting.
+        case kVK_UpArrow:   if gamepad.invertPitch { input.kb.dive = down }  else { input.kb.climb = down }
+        case kVK_DownArrow: if gamepad.invertPitch { input.kb.climb = down } else { input.kb.dive = down }
         case kVK_Space:                     input.kb.fire = down    // Space is always fire
         case kVK_ANSI_F:
             // Feature flag: F grabs a screenshot. On its own key (not Space) so

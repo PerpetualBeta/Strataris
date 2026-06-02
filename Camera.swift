@@ -27,7 +27,11 @@ struct Camera {
 
     let scaleHeight: Float = 220   // vertical projection scale
     let maxDistance: Float = 800   // far clip (z)
-    let clearance: Float = 110     // min altitude kept above the terrain
+    // Min altitude kept above the terrain. The voxel raycaster needs a big buffer
+    // so the eye never dips below the heightmap; the mesh renderer has no such
+    // constraint, so it sets a much smaller floor (see Renderer.meshClearance) to
+    // allow satisfying low, terrain-skimming flight.
+    var clearance: Float = 110
 
     static func start(over terrain: Terrain, renderHeight: Int) -> Camera {
         let h = terrain.heightF(512, 512)

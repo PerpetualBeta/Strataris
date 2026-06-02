@@ -502,6 +502,12 @@ final class VoxelRenderer {
         drawDottedBox(cx: p.x, cy: p.y, half: r, color: color)
     }
 
+    /// Lock box from a pre-projected screen position + radius (mesh renderer:
+    /// the caller projects through the quaternion camera).
+    func drawLockBox(screenX: Float, screenY: Float, half: Float, color: UInt32) {
+        drawDottedBox(cx: screenX, cy: screenY, half: min(half, Float(height) * 4) + 5, color: color)
+    }
+
     private func drawDottedBox(cx: Float, cy: Float, half: Float, color: UInt32) {
         let x0 = Int(cx - half), x1 = Int(cx + half)
         let y0 = Int(cy - half), y1 = Int(cy + half)
@@ -852,7 +858,25 @@ final class VoxelRenderer {
         Font.draw("SPD \(speed)  ALT \(altitude)", into: fb, w: width, h: height, x: 10, y: height - 12, color: white)
     }
 
-    func drawRadar(camera: Camera, enemies: EnemyField, structures: StructureField) {
+    func drawRadar(camera: Camera, enemies: EnemyField?, structures: StructureField?) {
+        let a = camera.angle
+        drawRadar(originX: camera.x, originY: camera.y,
+                  fwdX: -sinf(a), fwdY: -cosf(a), rightX: cosf(a), rightY: -sinf(a),
+                  enemies: enemies, structures: structures)
+    }
+
+    /// Radar scope from an explicit ground basis, so the mesh renderer can pass
+    /// the quaternion camera's *actual* forward/right (its basis handedness differs
+    /// from the voxel yaw convention, so re-deriving from a heading would mirror
+    /// left/right). `fwd`/`right` need not be unit length (only direction matters).
+    /// nil `enemies`/`structures` draw an empty scope (warp transit — contact lost).
+    func drawRadar(originX: Float, originY: Float,
+                   fwdX: Float, fwdY: Float, rightX rx: Float, rightY ry: Float,
+                   enemies: EnemyField?, structures: StructureField?) {
+        // Normalise the supplied basis so blip distances are in world units.
+        let fl = max(1e-5, sqrtf(fwdX * fwdX + fwdY * fwdY))
+        let rl = max(1e-5, sqrtf(rx * rx + ry * ry))
+        let fwdX = fwdX / fl, fwdY = fwdY / fl, rightX = rx / rl, rightY = ry / rl
         let R = roundR - 3                          // scope interior (ring drawn by drawCockpit)
         let cxp = radarCx, cyp = roundCy
         let range: Float = 1600
@@ -871,10 +895,7 @@ final class VoxelRenderer {
             }
         }
 
-        // Player basis: rotate the world so forward points up on the scope.
-        let a = camera.angle
-        let fwdX = -sinf(a), fwdY = -cosf(a)
-        let rightX = cosf(a), rightY = -sinf(a)
+        // Player basis (passed in): forward points up on the scope, right to the right.
         let mapSize = Float(terrain.size)
         let inner = Float(R - 1)
         func wrap(_ d: Float) -> Float {
@@ -884,7 +905,7 @@ final class VoxelRenderer {
             return r
         }
         func blip(_ wx: Float, _ wy: Float, _ color: UInt32, _ s: Int) {
-            let dx = wrap(wx - camera.x), dy = wrap(wy - camera.y)
+            let dx = wrap(wx - originX), dy = wrap(wy - originY)
             let fwd = dx * fwdX + dy * fwdY
             let rgt = dx * rightX + dy * rightY
             var ox = (rgt / range) * inner
@@ -895,8 +916,8 @@ final class VoxelRenderer {
             for j in -s...s { for i in -s...s { plot(ix + i, iy + j, color) } }
         }
 
-        for st in structures.structures where st.alive { blip(st.x, st.y, packRGBA(90, 220, 255), 1) }
-        for e in enemies.enemies { blip(e.x, e.y, packRGBA(255, 90, 40), 0) }
+        for st in structures?.structures ?? [] where st.alive { blip(st.x, st.y, packRGBA(90, 220, 255), 1) }
+        for e in enemies?.enemies ?? [] { blip(e.x, e.y, packRGBA(255, 90, 40), 0) }
 
         // Player marker — a small triangle pointing up at the centre.
         let p = packRGBA(120, 255, 140)

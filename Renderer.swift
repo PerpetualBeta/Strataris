@@ -14,6 +14,7 @@
 import MetalKit
 import QuartzCore
 import AppKit
+import simd
 
 // Internal render resolution. 16:9, deliberately tiny. Bump later if we want
 // a sharper look; the CPU cost scales with width × distance-steps.
@@ -67,6 +68,15 @@ final class Renderer: NSObject, MTKViewDelegate {
     private var camera: Camera
     private var titleCam: Camera        // drifting cinematic camera for the attract flyover
     private let input: InputState
+
+    // GPU mesh-terrain renderer (true 6DOF-capable; the default). The legacy
+    // `Camera` stays authoritative for flight/HUD/AI in this milestone; `camera6`
+    // is the quaternion view derived from it each frame to draw the 3D world.
+    // `useMesh` is fixed at init (flag + successful renderer build); flipping the
+    // FeatureFlag falls the whole game back to the Voxel-Space raycaster.
+    private var mesh: MeshTerrainRenderer?
+    private let useMesh: Bool
+    private var camera6 = Camera6DOF.start(position: SIMD3<Float>(512, 512, 200))
 
     private var lastTime: CFTimeInterval = 0
     private var state: GameState = .title
@@ -220,7 +230,16 @@ final class Renderer: NSObject, MTKViewDelegate {
         self.titleStructures = StructureField(terrain: tt, around: 512, cy: 512, count: 5, seed: tSeed ^ 0xABCD)
         self.titleCam = Camera.start(over: tt, renderHeight: h)
 
+        // Build the GPU mesh-terrain renderer for planet 1 (the default path).
+        // If the flag is off or the build fails, fall back to the voxel raycaster.
+        let m = FeatureFlags.useMeshRenderer
+            ? MeshTerrainRenderer(device: device, terrain: t, width: w, height: h)
+            : nil
+        self.mesh = m
+        self.useMesh = (m != nil)
+
         super.init()
+        resetCamera6(over: terrain)
     }
 
     func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
@@ -242,6 +261,8 @@ final class Renderer: NSObject, MTKViewDelegate {
                              difficulty: Renderer.difficulty(forPlanet: n),
                              seed: seed ^ 0x00DE_F123)
         camera = Camera.start(over: t, renderHeight: RenderConfig.height)
+        mesh?.setTerrain(t)                 // off the hot path (load / restart): sync is fine
+        resetCamera6(over: t)
         projectiles = ProjectileField()
         bombs = ProjectileField()
         smoke = SmokeField(terrain: t)
@@ -337,6 +358,148 @@ final class Renderer: NSObject, MTKViewDelegate {
 
     private func notify(_ text: String) { perkBanner = text; perkBannerTimer = 4 }
 
+    // MARK: Mesh-renderer flight (Milestone 1)
+
+    /// Min altitude above terrain in mesh mode. The mesh renderer (unlike the
+    /// voxel raycaster's `Camera.clearance = 110`) has no need to keep the eye
+    /// well above the heightmap, so this is small — you can dive and skim the hills.
+    private let meshClearance: Float = 22
+    private let meshThrottle: (min: Float, max: Float, accel: Float) = (20, 280, 140)
+
+    /// Spawn / reset the authoritative 6DOF flight camera over a terrain.
+    private func resetCamera6(over t: Terrain) {
+        let g = t.heightF(512, 512)
+        camera6 = Camera6DOF.start(position: SIMD3<Float>(512, 512, g + 90))
+        camera6.speed = 90
+    }
+
+    /// Authoritative flight in mesh mode: the proven spike model — fly along the
+    /// real forward vector through a quaternion camera (restricted envelope:
+    /// coordinated bank-turn, clamped pitch, auto-level on release). The legacy
+    /// `Camera` is then synced FROM this so the HUD, radar, enemy AI and engine
+    /// audio keep reading it unchanged.
+    private func updateMeshFlight(dt: Float) {
+        // Throttle.
+        if input.faster { camera6.speed = min(meshThrottle.max, camera6.speed + meshThrottle.accel * dt) }
+        if input.slower { camera6.speed = max(meshThrottle.min, camera6.speed - meshThrottle.accel * dt) }
+
+        // Steer (coordinated bank-turn) + pitch (clamped). The `climb` field is
+        // nose-down/descend, `dive` is nose-up/climb (GameView/Gamepad already fold
+        // in the Invert-pitch setting), so pitchIn>0 = nose down to match flyRestricted.
+        let turn = (input.bankLeft ? 1 : 0) - (input.bankRight ? 1 : 0)
+        // flyRestricted's positive pitch is nose-UP, and `dive` is the climb/nose-up
+        // field (`climb` is descend, matching Camera.update), so pitchIn = dive − climb.
+        let pitchIn = (input.dive ? 1 : 0) - (input.climb ? 1 : 0)
+        camera6.flyRestricted(turn: Float(turn), pitchIn: Float(pitchIn), dt: dt)
+
+        // Fly along the real facing, so pitching the nose actually climbs/dives.
+        camera6.position += camera6.forward * camera6.speed * dt
+
+        // Terrain-follow floor (ride up over hills) + soft ceiling.
+        let ground = terrain.heightF(camera6.position.x, camera6.position.y)
+        camera6.position.z = max(camera6.position.z, ground + meshClearance)
+        camera6.position.z = min(camera6.position.z, 460)
+
+        // Sync the legacy camera for everything that still reads it.
+        camera.x = camera6.position.x
+        camera.y = camera6.position.y
+        camera.height = camera6.position.z
+        camera.angle = camera6.groundHeading
+        camera.speed = camera6.speed
+        // Attitude dial: drawAttitude exaggerates bank ×3 (tuned for the voxel
+        // build's tiny cosmetic roll), so pre-divide to show the TRUE bank angle —
+        // it should read the same tilt as the 3D horizon. Pitch maps the ±0.5 rad
+        // envelope onto the dial's ±80 scale.
+        camera.roll = camera6.bankAngle / 3
+        camera.pitch = camera6.pitchAngle / 0.5 * 80
+    }
+
+    /// Re-express a world position in the camera's wrap neighbourhood: the map
+    /// tiles every `terrain.size` units, so pick the image of (x, y) nearest the
+    /// camera — otherwise craft/effects across the wrap seam render a full map
+    /// away (fogged out, invisible) instead of right next door. Mirrors the
+    /// wrapDelta the voxel `project` / radar / AI all apply.
+    private func meshWrapped(_ x: Float, _ y: Float, _ z: Float) -> SIMD3<Float> {
+        let size = Float(terrain.size), h = size * 0.5
+        func near(_ v: Float, _ c: Float) -> Float {
+            var d = (v - c).truncatingRemainder(dividingBy: size)
+            if d > h { d -= size } else if d < -h { d += size }
+            return c + d
+        }
+        return SIMD3(near(x, camera6.position.x), near(y, camera6.position.y), z)
+    }
+
+    /// Craft as GPU entity transforms (kind + world model matrix), wrapped into
+    /// the camera's neighbourhood.
+    private func meshEntities() -> [(kind: EnemyKind, model: simd_float4x4)] {
+        enemies.enemies.map { e in
+            var m = enemyModel(e, scale: enemies.scale(for: e.kind))
+            m.columns.3 = SIMD4<Float>(meshWrapped(e.x, e.y, e.z), 1)
+            return (kind: e.kind, model: m)
+        }
+    }
+
+    /// Map the live effect state to camera-facing billboards for the 3D pass:
+    /// explosions (additive core + glow), smoke (alpha) / embers (additive), and
+    /// enemy bolts / falling bombs (additive). Mirrors the voxel sprite draws.
+    private func meshFX() -> [Billboard] {
+        var fx = [Billboard]()
+        for ex in combat.explosions {
+            let t = max(0, min(1, ex.age / combat.explosionDuration)), a = 1 - t
+            let size = 16 + t * 34, c = meshWrapped(ex.x, ex.y, ex.z)
+            fx.append(Billboard(center: c, size: size,       color: SIMD4(1.0, 0.82, 0.40, a),         additive: true))
+            fx.append(Billboard(center: c, size: size * 1.7, color: SIMD4(1.0, 0.45, 0.16, a * 0.55),  additive: true))
+        }
+        for p in smoke.particles {
+            let t = max(0, min(1, p.age / p.life)), c = meshWrapped(p.x, p.y, p.z)
+            if p.fire {
+                fx.append(Billboard(center: c, size: 6 + t * 6, color: SIMD4(1.0, 0.6 - t * 0.3, 0.2, (1 - t) * 0.9), additive: true))
+            } else {
+                fx.append(Billboard(center: c, size: 7 + t * 14, color: SIMD4(0.5, 0.5, 0.55, (1 - t) * 0.5), additive: false))
+            }
+        }
+        for s in projectiles.shots { fx.append(Billboard(center: meshWrapped(s.x, s.y, s.z), size: 4, color: SIMD4(1, 1, 0.6, 1), additive: true)) }
+        for s in bombs.shots       { fx.append(Billboard(center: meshWrapped(s.x, s.y, s.z), size: 5, color: SIMD4(1, 0.5, 0.2, 1), additive: true)) }
+        return fx
+    }
+
+    /// Project a craft through the quaternion camera (mesh mode), matching where
+    /// the GPU pass draws it. nil if behind the camera / off-screen.
+    private func meshProject(enemyAt idx: Int) -> (x: Float, y: Float, depth: Float, radiusScale: Float)? {
+        guard enemies.enemies.indices.contains(idx) else { return nil }
+        let e = enemies.enemies[idx]
+        return camera6.project(meshWrapped(e.x, e.y, e.z),
+                               width: RenderConfig.width, height: RenderConfig.height)
+    }
+
+    /// Mesh-mode equivalent of `voxel.targetedEnemy`: nearest craft (by depth)
+    /// whose projected billboard the centre reticle is over. Terrain occlusion is
+    /// best-effort (skipped) — craft hover clear of the ground.
+    private func meshTargetedEnemy() -> Int? {
+        let cx = RenderConfig.crosshairX, cy = RenderConfig.crosshairY
+        var best: Int? = nil, bestDepth = Float.greatestFiniteMagnitude
+        for (i, e) in enemies.enemies.enumerated() {
+            guard let p = meshProject(enemyAt: i) else { continue }
+            let r = min(enemies.scale(for: e.kind) * p.radiusScale, Float(RenderConfig.height) * 4) + 4
+            if abs(cx - p.x) > r || abs(cy - p.y) > r { continue }
+            if p.depth < bestDepth { bestDepth = p.depth; best = i }
+        }
+        return best
+    }
+
+    /// Mesh-mode equivalent of `voxel.lockableEnemy`: nearest-to-reticle craft
+    /// within `zone` px, ranked by 2D screen distance.
+    private func meshLockableEnemy(zone: Float) -> Int? {
+        let cx = RenderConfig.crosshairX, cy = RenderConfig.crosshairY
+        var best: Int? = nil, bestD2 = zone * zone
+        for (i, _) in enemies.enemies.enumerated() {
+            guard let p = meshProject(enemyAt: i) else { continue }
+            let dx = cx - p.x, dy = cy - p.y, d2 = dx * dx + dy * dy
+            if d2 < bestD2 { bestD2 = d2; best = i }
+        }
+        return best
+    }
+
     /// Targeting computer: keep the current lock while the craft stays within the
     /// target zone (100px of the reticle); otherwise acquire the nearest craft in
     /// the zone. Re-resolving the stable id each frame survives array compaction.
@@ -344,18 +507,24 @@ final class Renderer: NSObject, MTKViewDelegate {
         let cx = RenderConfig.crosshairX, cy = RenderConfig.crosshairY
         let zone: Float = 100
         if let id = targetLockId {
-            if let idx = enemies.index(forId: id),
-               let d = voxel.screenDistanceToReticle(ofEnemyAt: idx, in: enemies, camera: camera,
-                                                      crosshairX: cx, crosshairY: cy),
-               d <= zone {
-                return                              // lock still valid and in-zone
+            var inZone = false
+            if let idx = enemies.index(forId: id) {
+                if useMesh {
+                    if let p = meshProject(enemyAt: idx) {
+                        let dx = cx - p.x, dy = cy - p.y; inZone = sqrtf(dx * dx + dy * dy) <= zone
+                    }
+                } else if let d = voxel.screenDistanceToReticle(ofEnemyAt: idx, in: enemies, camera: camera,
+                                                                crosshairX: cx, crosshairY: cy) {
+                    inZone = d <= zone
+                }
             }
+            if inZone { return }                    // lock still valid and in-zone
             targetLockId = nil                      // died, left view, or left the zone
         }
-        if let idx = voxel.lockableEnemy(in: enemies, camera: camera,
-                                         crosshairX: cx, crosshairY: cy, zoneRadius: zone) {
-            targetLockId = enemies.enemies[idx].id
-        }
+        let acquired = useMesh ? meshLockableEnemy(zone: zone)
+                               : voxel.lockableEnemy(in: enemies, camera: camera,
+                                                     crosshairX: cx, crosshairY: cy, zoneRadius: zone)
+        if let idx = acquired { targetLockId = enemies.enemies[idx].id }
     }
 
     /// Start the warp: generate the next planet on a background thread while a
@@ -383,6 +552,7 @@ final class Renderer: NSObject, MTKViewDelegate {
                 self.warpTerrain = t; self.warpVoxel = vox
                 self.warpStructures = str; self.warpEnemies = en
                 self.warpReady = true
+                self.mesh?.stageTerrain(t)      // build the new patch off-thread for an instant commit
             }
         }
     }
@@ -391,6 +561,8 @@ final class Renderer: NSObject, MTKViewDelegate {
         guard let t = warpTerrain, let vox = warpVoxel, let str = warpStructures, let en = warpEnemies else { return }
         terrain = t; voxel = vox; structures = str; enemies = en      // score (combat) carries over
         camera = Camera.start(over: t, renderHeight: RenderConfig.height)
+        mesh?.commitStagedTerrain(fallback: t)                        // instant swap (staged during the cut-scene)
+        resetCamera6(over: t)
         projectiles = ProjectileField(); bombs = ProjectileField(); smoke = SmokeField(terrain: t)
         shield = maxShield; shieldRechargeDelay = 0; damageFlash = 0
         combat.clearTransient()
@@ -428,6 +600,9 @@ final class Renderer: NSObject, MTKViewDelegate {
                     audio.whoosh(rising: false)             // re-entry
                     warpCam = Camera.start(over: warpTerrain ?? terrain, renderHeight: RenderConfig.height)
                     warpCam.x = 512; warpCam.y = 512; warpCam.angle = 0
+                    // Mesh mode flies the descent over the NEW world, so commit
+                    // the staged patch now (finalizeWarp's commit becomes a no-op).
+                    if useMesh, let nt = warpTerrain { mesh?.commitStagedTerrain(fallback: nt) }
                 }
                 if warpPhase >= 5 { finalizeWarp(); return }
             }
@@ -439,14 +614,17 @@ final class Renderer: NSObject, MTKViewDelegate {
         audio.engine(on: true, speed: (warpPhase == 0 || warpPhase == 4) ? 260 : 30)
 
         // Draws the cockpit instrument cluster + radar over the cut-scene, so we
-        // stay "in the ship" the whole time (no sudden EVA).
-        func panel(_ vox: VoxelRenderer, _ cam: Camera, _ str: StructureField, _ en: EnemyField, _ t: Terrain) {
+        // stay "in the ship" the whole time (no sudden EVA). The radar scope is
+        // empty in transit (`blips: false`) — contact drops the moment we depart,
+        // and the new world's blips only paint on the descent.
+        func panel(_ vox: VoxelRenderer, _ cam: Camera, _ str: StructureField, _ en: EnemyField, _ t: Terrain,
+                   blips: Bool) {
             let alt = max(0, Int(cam.height - t.heightF(cam.x, cam.y)))
             vox.drawCockpit(score: combat.score, basesStanding: str.standing, basesTotal: str.structures.count,
                             aliens: en.remaining, planetName: PlanetTheme.name(forLevel: level), level: level,
                             speed: Int(cam.speed), altitude: alt,
                             shield: Int(shield), maxShield: Int(maxShield), roll: cam.roll, pitch: cam.pitch)
-            vox.drawRadar(camera: cam, enemies: en, structures: str)
+            vox.drawRadar(camera: cam, enemies: blips ? en : nil, structures: blips ? str : nil)
             chrono(on: vox)
         }
         let labelY = Int(Float(H) * 0.12)
@@ -457,28 +635,39 @@ final class Renderer: NSObject, MTKViewDelegate {
             warpCam.horizon = camera.horizon + p * Float(H) * 0.55
             warpCam.x += -sinf(warpCam.angle) * 36 * dt
             warpCam.y += -cosf(warpCam.angle) * 36 * dt
-            voxel.render(camera: warpCam)
+            if useMesh, let m = mesh {
+                // Same climb through the live engine: the nose lifts as the climb
+                // steepens (the voxel path's rising horizon), so departure matches
+                // gameplay instead of cutting back to the raycaster.
+                let pos = SIMD3<Float>(warpCam.x, warpCam.y, warpCam.height)
+                let c6 = Camera6DOF.restricted(position: pos, heading: warpCam.angle,
+                                               pitch: 0.5 * p, bank: 0, speed: 260)
+                m.recenterIfNeeded(around: pos)
+                m.renderInto(voxel.framebuffer, camera: c6)
+            } else {
+                voxel.render(camera: warpCam)
+            }
             voxel.dimScreen(p > 0.7 ? (p - 0.7) / 0.3 : 0)
-            panel(voxel, warpCam, structures, enemies, terrain)
+            panel(voxel, warpCam, structures, enemies, terrain, blips: false)
             voxel.drawUnicodeCentered("DEPARTING", y: labelY, fontSize: 14, 0.82, 0.9, 1.0)
             present(in: view, from: voxel)
         case 1:   // orbit — the planet we left, shrinking
             voxel.clearSpace(warpTime)
             voxel.drawGlobe(cx: W / 2, cy: H / 2 - Int(18 * p), r: max(1, Int(120 - 84 * p)),
                             base: globeColor(terrain.theme))
-            panel(voxel, warpCam, structures, enemies, terrain)
+            panel(voxel, warpCam, structures, enemies, terrain, blips: false)
             voxel.drawUnicodeCentered("LEAVING ORBIT", y: labelY, fontSize: 14, 0.82, 0.9, 1.0)
             present(in: view, from: voxel)
         case 2:   // hyperspace
             voxel.drawHyperspace(time: warpTime, progress: p)
-            panel(voxel, warpCam, structures, enemies, terrain)
+            panel(voxel, warpCam, structures, enemies, terrain, blips: false)
             voxel.drawUnicodeCentered("HYPERSPACE", y: labelY, fontSize: 16, 0.85, 0.92, 1.0)
             present(in: view, from: voxel)
         case 3:   // approach — the new planet growing
             voxel.clearSpace(warpTime + 11)
             voxel.drawGlobe(cx: W / 2, cy: H / 2, r: Int(20 + 112 * p),
                             base: globeColor(warpTerrain?.theme ?? terrain.theme))
-            panel(voxel, warpCam, structures, enemies, terrain)
+            panel(voxel, warpCam, structures, enemies, terrain, blips: false)
             voxel.drawUnicodeCentered("APPROACHING \(PlanetTheme.name(forLevel: level).uppercased())", y: labelY, fontSize: 13, 0.85, 0.92, 1.0)
             present(in: view, from: voxel)
         default:  // 4: descent — drop into the new world
@@ -487,9 +676,23 @@ final class Renderer: NSObject, MTKViewDelegate {
                 let pe = 1 - (1 - p) * (1 - p)              // ease out
                 warpCam.height = (g + 760) + ((g + 140) - (g + 760)) * pe
                 warpCam.horizon = Float(H) * (0.85 - 0.45 * p)
-                nv.render(camera: warpCam)
+                if useMesh, let m = mesh {
+                    // The staged patch was committed at phase entry, so the mesh
+                    // already holds the NEW world: flare in nose-high and settle
+                    // level as the altitude bleeds off — no renderer cut at the
+                    // playing handoff. No recenter here: the stride-1 patch is
+                    // exactly what gameplay resumes on, and re-LODding for the
+                    // brief high-altitude pass would just thrash rebuilds — the
+                    // close fog at entry reads as re-entry haze burning off.
+                    let pos = SIMD3<Float>(warpCam.x, warpCam.y, warpCam.height)
+                    let c6 = Camera6DOF.restricted(position: pos, heading: warpCam.angle,
+                                                   pitch: 0.45 * (1 - p), bank: 0, speed: 260)
+                    m.renderInto(nv.framebuffer, camera: c6)
+                } else {
+                    nv.render(camera: warpCam)
+                }
                 nv.dimScreen(p < 0.3 ? (0.3 - p) / 0.3 : 0)
-                panel(nv, warpCam, ns, ne, nt)
+                panel(nv, warpCam, ns, ne, nt, blips: true)
                 nv.drawUnicodeCentered("\(PlanetTheme.name(forLevel: level).uppercased())   ·   LEVEL \(level)", y: labelY, fontSize: 14, 0.85, 0.92, 1.0)
                 present(in: view, from: nv)
             }
@@ -705,9 +908,15 @@ final class Renderer: NSObject, MTKViewDelegate {
         let flying = ((state == .playing || state == .won) && !paused && !gamepad.configuring)
 
         if flying {
-            camera.update(dt: dt, input: input, terrain: terrain)
+            // Mesh mode flies the authoritative 6DOF camera (and syncs `camera`);
+            // voxel mode runs the legacy flight model directly.
+            if useMesh { updateMeshFlight(dt: dt) }
+            else { camera.update(dt: dt, input: input, terrain: terrain) }
         }
-        voxel.render(camera: camera)
+        // Voxel mode renders the world now so the depth buffer is ready for the
+        // reticle hit-test below. Mesh mode renders after the game logic (it
+        // projects through `camera6` and draws the final craft positions).
+        if !useMesh { voxel.render(camera: camera) }
 
         if active {
             // Radial pulse weapon (feature flag): wipe every remaining craft.
@@ -748,12 +957,16 @@ final class Renderer: NSObject, MTKViewDelegate {
             // Targeting computer (perk, level 6): keep/refresh the lock BEFORE the
             // fire hit-test so fire can be redirected to the locked craft.
             if hasTargetingComputer { updateTargetLock() } else { targetLockId = nil }
-            let lockedIdx = targetLockId.flatMap { enemies.index(forId: $0) }
-            // Player-fire hit-test BEFORE drawing sprites: the depth buffer
-            // must hold terrain only, or a craft would occlude its own shot.
+            var lockedIdx = targetLockId.flatMap { enemies.index(forId: $0) }
+            // Mesh mode resolves the fire target through the quaternion projection
+            // (and disables the voxel reticle fallback). With a targeting-computer
+            // lock that wins; otherwise fire follows whatever's under the reticle.
+            if useMesh && lockedIdx == nil { lockedIdx = meshTargetedEnemy() }
+            // Player-fire hit-test BEFORE drawing sprites: in voxel mode the depth
+            // buffer must hold terrain only, or a craft would occlude its own shot.
             combat.update(dt: dt, input: input, camera: camera, field: enemies, voxel: voxel, smoke: smoke,
                           crosshairX: RenderConfig.crosshairX, crosshairY: RenderConfig.crosshairY,
-                          lockedTargetIndex: lockedIdx)
+                          lockedTargetIndex: lockedIdx, useReticleFallback: !useMesh)
             // Advance enemy fire (hits drain hull) and the visible bombs
             // (aimed at structures — kept off the player by a far aim point).
             let hits = projectiles.update(dt: dt, playerX: camera.x, playerY: camera.y,
@@ -796,8 +1009,12 @@ final class Renderer: NSObject, MTKViewDelegate {
 
             attackCalloutTimer = max(0, attackCalloutTimer - dt)
             let curHP = structures.structures.reduce(0) { $0 + max(0, $1.health) }
-            if curHP < prevVoiceStructHealth && attackCalloutTimer <= 0 {
-                comms.say("Command post under attack"); attackCalloutTimer = 12
+            if curHP < prevVoiceStructHealth {
+                // A base was damaged or destroyed → the heightfield was re-stamped
+                // (crumble look / ground restored). Rebuild the mesh patch so the
+                // change shows up; the voxel path samples live, so it's a no-op there.
+                mesh?.markTerrainDirty()
+                if attackCalloutTimer <= 0 { comms.say("Command post under attack"); attackCalloutTimer = 12 }
             }
             prevVoiceStructHealth = curHP
 
@@ -858,23 +1075,45 @@ final class Renderer: NSObject, MTKViewDelegate {
 
         if flying { smoke.update(dt: dt, structures: structures, maxHealth: structures.maxHealth) }
 
-        voxel.drawEnemies(enemies, camera: camera)
+        // World render. Mesh mode draws terrain + craft + effects on the GPU and
+        // reads the frame back into the framebuffer; everything below composites
+        // 2D over it. Voxel mode draws the craft as CPU sprites over its raycast.
+        if useMesh {
+            mesh?.recenterIfNeeded(around: camera6.position)
+            mesh?.renderInto(voxel.framebuffer, camera: camera6,
+                             entities: meshEntities(), fx: meshFX())
+        } else {
+            voxel.drawEnemies(enemies, camera: camera)
+        }
         // Targeting computer: red dotted box around the locked craft.
         if hasTargetingComputer, let li = targetLockId.flatMap({ enemies.index(forId: $0) }) {
-            voxel.drawLockBox(forEnemyAt: li, in: enemies, camera: camera, color: packRGBA(255, 60, 60))
+            if useMesh {
+                if let p = meshProject(enemyAt: li) {
+                    voxel.drawLockBox(screenX: p.x, screenY: p.y,
+                                      half: enemies.scale(for: enemies.enemies[li].kind) * p.radiusScale,
+                                      color: packRGBA(255, 60, 60))
+                }
+            } else {
+                voxel.drawLockBox(forEnemyAt: li, in: enemies, camera: camera, color: packRGBA(255, 60, 60))
+            }
         }
-        voxel.drawExplosions(combat.explosions, duration: combat.explosionDuration, camera: camera)
-        voxel.drawProjectiles(bombs, camera: camera,                       // ordnance on bases — orange-red
-                              glow: packRGBA(255, 120, 40), core: packRGBA(255, 220, 130))
-        voxel.drawProjectiles(projectiles, camera: camera)                 // fire at you — hot yellow
-        voxel.drawSmoke(smoke, camera: camera)                             // damage plumes + debris
+        if !useMesh {
+            voxel.drawExplosions(combat.explosions, duration: combat.explosionDuration, camera: camera)
+            voxel.drawProjectiles(bombs, camera: camera,                   // ordnance on bases — orange-red
+                                  glow: packRGBA(255, 120, 40), core: packRGBA(255, 220, 130))
+            voxel.drawProjectiles(projectiles, camera: camera)             // fire at you — hot yellow
+            voxel.drawSmoke(smoke, camera: camera)                         // damage plumes + debris
+        }
         if combat.tracerActive {
             // Bolts converge on the locked craft when the targeting computer
             // has a lock, otherwise on the fixed reticle.
             var tx = RenderConfig.crosshairX, ty = RenderConfig.crosshairY
-            if hasTargetingComputer, let li = targetLockId.flatMap({ enemies.index(forId: $0) }),
-               let sp = voxel.screenPosition(ofEnemyAt: li, in: enemies, camera: camera) {
-                tx = sp.x; ty = sp.y
+            if hasTargetingComputer, let li = targetLockId.flatMap({ enemies.index(forId: $0) }) {
+                if useMesh {
+                    if let p = meshProject(enemyAt: li) { tx = p.x; ty = p.y }
+                } else if let sp = voxel.screenPosition(ofEnemyAt: li, in: enemies, camera: camera) {
+                    tx = sp.x; ty = sp.y
+                }
             }
             voxel.drawTracers(crosshairX: tx, crosshairY: ty)
         }
@@ -892,7 +1131,16 @@ final class Renderer: NSObject, MTKViewDelegate {
                           altitude: max(0, Int(camera.height - terrain.heightF(camera.x, camera.y))),
                           shield: Int(shield), maxShield: Int(maxShield),
                           roll: camera.roll, pitch: camera.pitch)
-        voxel.drawRadar(camera: camera, enemies: enemies, structures: structures)
+        if useMesh {
+            // Feed the radar the quaternion camera's actual ground basis so blips
+            // aren't mirrored (its handedness differs from the voxel yaw convention).
+            let f = camera6.forward, r = camera6.right
+            voxel.drawRadar(originX: camera6.position.x, originY: camera6.position.y,
+                            fwdX: f.x, fwdY: f.y, rightX: r.x, rightY: r.y,
+                            enemies: enemies, structures: structures)
+        } else {
+            voxel.drawRadar(camera: camera, enemies: enemies, structures: structures)
+        }
         chrono(on: voxel)
         if hasRadialPulse { voxel.drawPulseCharges(pulseCharges) }
         if hasCloak { voxel.drawCloakStatus(active: cloakActive, cooldown: cloakCooldown) }

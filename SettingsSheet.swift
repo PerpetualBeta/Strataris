@@ -100,7 +100,7 @@ final class SettingsSheet: NSObject {
         fireStart.font = mono(12)
         fireStart.state = gamepad.fireConfirms ? .on : .off
 
-        let hint = NSTextField(labelWithString: "Pitch invert & deadzone are in Settings (⌘,).  Keyboard always works.")
+        let hint = NSTextField(labelWithString: "Pitch invert & deadzone are in Settings (⌘,).  Keyboard always works (invert applies to it too).")
         hint.font = mono(10)
         hint.textColor = .tertiaryLabelColor
 

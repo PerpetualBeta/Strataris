@@ -91,23 +91,33 @@ Deferred items, not yet scheduled. Pick from here when ready.
       the old "left trigger warps" toggle was retired. Keyboard stays a
       fallback. (Stick-axis remap / per-controller profiles still future work.)
 
+## Input (cont.)
+- [ ] **Keyboard configure sheet** — a rebinding UI for keyboard players,
+      mirroring the controller sheet (`SettingsSheet`). Today the keyboard map is
+      hardcoded in `GameView.set(keyCode:)` (arrows = steer/pitch, Space = fire,
+      X/Z perks, etc.) with no way to change it. Needs: a `keyBindings` store in
+      `GameSettings` (action → keyCode), a key-capture sheet (click an action →
+      press a key), reset-to-defaults, and `GameView` routing keyDown/Up through
+      the bindings instead of the fixed `switch`. Pair it with the existing
+      controller sheet so both input methods are configurable. (Pitch already
+      honours the shared Invert-pitch setting.)
+
+## Flight model (6DOF — exp/6dof branch)
+- [ ] **Flight Envelope Trim control** — let the player tune the pitch/roll (and
+      probably yaw) handling to her liking: a settings control exposing the
+      angular-rate / responsiveness of each axis (e.g. slow/precise ↔ twitchy),
+      and likely auto-level strength in the restricted envelope. Persist via
+      `GameSettings` (like invertPitch/deadzone). The spike currently hardcodes
+      the rates in `Spike6DOFController` (pitch/roll 1.9, yaw 1.1 rad/s); these
+      become the trim defaults. Surface in the Options/Controller sheet.
+
 ## Front-end / narrative screens
-- [ ] **Back-story screen** — a briefing/intro that sets the premise (our
-      colonies are under attack; you fly planet-to-planet defending the ground
-      installations). Reachable from the title menu (and maybe shown once on
-      first run). Scrolling or paged text over the attract-mode flyover, in the
-      cockpit/computer-display style; original prose (no copyrighted lore).
-- [ ] **Alien craft codex screen** — a "know your enemy" page showing each of
-      the four craft types with its low-poly 3D model (reuse `EnemyField.meshes`
-      / the mesh rasteriser, slowly rotating), its name, role/purpose, and the
-      points awarded for destroying it. Current values to display:
-      - **Drone** — 10 pts — cheap swarm; mimics the nearest destroyer/fighter.
-      - **Fighter** — 100 pts — hunts the player and strafes.
-      - **Destroyer** — 250 pts — bombs ground installations (freefall); turns
-        to hunt the player if you get within its defensive perimeter.
-      - **Mothership** — 2500 pts — slow, heavily armoured (10 hp), high value;
-        appears on a timer. (Confirm values against `Enemy.swift` at build time.)
-      Reachable from the title menu; in the same cockpit-display visual style.
+- [x] **Back-story screen** — done. Mission-briefing crawl (`.briefing` state /
+      `drawBriefing`): an "incoming transmission" of original lore over the
+      attract flyover, reachable from the title (B).
+- [x] **Alien craft codex screen** — done. `.codex` state / `drawCodex`: the
+      four craft types with their rotating low-poly meshes, names, roles and
+      point values, reachable from the title (V).
 
 ## Branding / assets
 - [x] **App icon.** Done — `generate_icon.swift` renders `AppIcon.icns`

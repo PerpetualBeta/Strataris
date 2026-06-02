@@ -21,6 +21,12 @@ enum FeatureFlags {
 
     // (The radial-pulse weapon is now a per-run level-12 perk, not a flag.)
 
+    /// The GPU triangle-mesh terrain renderer (true 6DOF-capable) is the default.
+    /// Opt back to the original Voxel-Space CPU raycaster for A/B comparison or
+    /// as a fallback:
+    ///   defaults write cc.jorviksoftware.Strataris UseVoxelRenderer -bool true
+    static var useMeshRenderer: Bool { !d.bool(forKey: "UseVoxelRenderer") }
+
     /// Force the "May the fourth be with you" callout at every mission start,
     /// regardless of the date (for testing the date-gated Easter egg).
     ///   defaults write cc.jorviksoftware.Strataris ForceMayTheFourth -bool true

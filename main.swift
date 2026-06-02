@@ -14,6 +14,12 @@ if ProcessInfo.processInfo.environment["STRATARIS_SMOKE"] != nil {
     exit(0)
 }
 
+// Experimental 6DOF renderer spike — headless orientation capture (exp/6dof).
+if ProcessInfo.processInfo.environment["STRATARIS_6DOF_PNG"] != nil {
+    Spike6DOF.runHeadlessCapture()
+    exit(0)
+}
+
 MainActor.assumeIsolated {
     let app = NSApplication.shared
     let delegate = AppDelegate()
