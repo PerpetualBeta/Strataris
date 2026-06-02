@@ -175,6 +175,17 @@ final class Renderer: NSObject, MTKViewDelegate {
     private var prevTracer = false
     private var lastTitleBeat = -1
 
+    // Title-music sequencer clock, driven by a BACKGROUND GCD timer: the render
+    // loop stalls during menu tracking / window drags, and even main-run-loop
+    // timers miss beats while AppKit opens a menu synchronously. A background
+    // queue is immune to all of it; audio.trigger is lock-guarded and
+    // thread-safe. (Reading `state` off-main is a benign race — at worst the
+    // theme starts/stops one tick late.)
+    private let musicQueue = DispatchQueue(label: "cc.jorviksoftware.strataris.music")
+    private var musicSource: DispatchSourceTimer?
+    private var musicClock: Double = 0
+    private var lastMusicTick: Double = 0
+
     private static func planetSeed(_ n: Int) -> UInt32 { 1000 &+ UInt32(n) &* 2_654_435_761 }
     private static func difficulty(forPlanet n: Int) -> Float { 1 + Float(n - 1) * 0.15 }
     private static func enemyCount(forPlanet n: Int) -> Int { 12 + (n - 1) * 3 }
@@ -256,6 +267,28 @@ final class Renderer: NSObject, MTKViewDelegate {
             level = n
             loadPlanet(n)
         }
+
+        // Title-theme sequencer: a background timer, so nothing the main thread
+        // does (menu tracking, synchronous menu opening, window drags, sheets)
+        // can starve the music mid-theme.
+        lastMusicTick = CACurrentMediaTime()
+        let src = DispatchSource.makeTimerSource(queue: musicQueue)
+        src.schedule(deadline: .now(), repeating: .milliseconds(25))
+        src.setEventHandler { [weak self] in self?.musicTick() }
+        src.resume()
+        musicSource = src
+    }
+
+    /// Advance the title-music clock and sequence the next notes (title /
+    /// briefing / codex only — gameplay has no music, just the world's audio).
+    /// Runs on `musicQueue`.
+    private func musicTick() {
+        let now = CACurrentMediaTime()
+        let dt = min(0.25, now - lastMusicTick)
+        lastMusicTick = now
+        guard state == .title || state == .briefing || state == .codex else { return }
+        musicClock += dt
+        titleMusic()
     }
 
     func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
@@ -300,8 +333,11 @@ final class Renderer: NSObject, MTKViewDelegate {
     /// brooding A theme, a rising chromatic bridge with double-time war-drums,
     /// then a climactic B statement an octave up with a dissonant high cluster,
     /// before resolving back. Deep moving bass + minor chords throughout.
+    ///
+    /// Sequenced from `musicTimer` (not the render loop) so it keeps playing
+    /// while AppKit's event tracking stalls MTKView's frame timer.
     private func titleMusic() {
-        let step = Int(titleTime / 0.19)        // slow + grave
+        let step = Int(musicClock / 0.19)       // slow + grave
         guard step != lastTitleBeat else { return }
         lastTitleBeat = step
         let s = step % 64
@@ -797,7 +833,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         loadPlanet(1)           // stage a clean run (also sets state = .playing)…
         state = .title          // …but show the attract screen until ENGAGE
         input.resetControls()
-        lastTitleBeat = -1      // restart the title theme cleanly
+        lastTitleBeat = -1; musicClock = 0      // restart the title theme cleanly
         audio.uiStart()
     }
 
@@ -846,8 +882,7 @@ final class Renderer: NSObject, MTKViewDelegate {
             let targetH = titleTerrain.heightF(titleCam.x, titleCam.y) + 95
             titleCam.height += (targetH - titleCam.height) * min(1, step * 2.5)
             audio.engine(on: false, speed: 0)
-
-            titleMusic()
+            // (Title music is sequenced by musicTimer, not per-frame here.)
 
             if input.restart && !restartLatch {
                 restartLatch = true
@@ -894,7 +929,6 @@ final class Renderer: NSObject, MTKViewDelegate {
             let targetH = titleTerrain.heightF(titleCam.x, titleCam.y) + 95
             titleCam.height += (targetH - titleCam.height) * min(1, step * 2.5)
             audio.engine(on: false, speed: 0)
-            titleMusic()
 
             // ENTER engages (starts the game); B stands down (back to title).
             if input.restart && !restartLatch {
@@ -930,7 +964,6 @@ final class Renderer: NSObject, MTKViewDelegate {
             let targetH = titleTerrain.heightF(titleCam.x, titleCam.y) + 95
             titleCam.height += (targetH - titleCam.height) * min(1, step * 2.5)
             audio.engine(on: false, speed: 0)
-            titleMusic()
 
             // ENTER engages (starts the game); V closes (back to title).
             if input.restart && !restartLatch {

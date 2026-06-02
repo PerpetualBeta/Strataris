@@ -2,8 +2,9 @@
 //
 // An MTKView that captures keyboard input into the keyboard source of the
 // shared InputState. Held keys flip flags; we swallow the keys we handle so
-// macOS doesn't play the "unhandled key" funk sound. Pressing C opens the
-// controller settings sheet.
+// macOS doesn't play the "unhandled key" funk sound. Flight/combat keys are
+// player-rebindable (KeyBindings); menu/system keys are fixed. Pressing C
+// opens the controller settings sheet, K the keyboard one.
 
 import MetalKit
 import Carbon.HIToolbox   // kVK_* virtual key-code constants
@@ -34,16 +35,15 @@ final class GameView: MTKView {
             interpretKeyEvents([event])
             return
         }
-        if !set(keyCode: Int(event.keyCode), down: true) {
-            super.keyDown(with: event)
-        }
+        // Swallow even unhandled keys: passing them to super plays the system
+        // "funk" alert over the title music. Menu key-equivalents (⌘Q etc.)
+        // are dispatched before keyDown, so nothing real is lost.
+        _ = set(keyCode: Int(event.keyCode), down: true)
     }
 
     override func keyUp(with event: NSEvent) {
         if input.nameEntryActive { return }
-        if !set(keyCode: Int(event.keyCode), down: false) {
-            super.keyUp(with: event)
-        }
+        _ = set(keyCode: Int(event.keyCode), down: false)
     }
 
     // MARK: Text input (high-score name entry)
@@ -68,25 +68,13 @@ final class GameView: MTKView {
 
     /// Returns true if we consumed the key. Writes the KEYBOARD source.
     private func set(keyCode: Int, down: Bool) -> Bool {
+        // Rebindable flight/combat actions first — the player-configured map
+        // (Keyboard… sheet, K). Bound keys always win over the fixed fallbacks.
+        if let action = KeyBindings.shared.action(for: keyCode) {
+            apply(action, down: down)
+            return true
+        }
         switch keyCode {
-        case kVK_LeftArrow:                 input.kb.bankLeft = down
-        case kVK_RightArrow:                input.kb.bankRight = down
-        // Pitch honours the Invert-pitch setting (shared with the gamepad). Default
-        // (off) is flight-stick sense: ↑ = nose down / descend, ↓ = nose up / climb.
-        // Inverted swaps them so ↑ = climb. Map at key time so the toggle applies
-        // live without restarting.
-        case kVK_UpArrow:   if gamepad.invertPitch { input.kb.dive = down }  else { input.kb.climb = down }
-        case kVK_DownArrow: if gamepad.invertPitch { input.kb.climb = down } else { input.kb.dive = down }
-        case kVK_Space:                     input.kb.fire = down    // Space is always fire
-        case kVK_ANSI_A:                    input.kb.yawLeft = down  // yaw — full 6DOF (level-3 Axis Unlock)
-        case kVK_ANSI_D:                    input.kb.yawRight = down
-        case kVK_ANSI_F:
-            // Feature flag: F grabs a screenshot. On its own key (not Space) so
-            // keyboard-only players can still fire. Gamepad uses its own binding.
-            guard FeatureFlags.screenshotOnSpace else { return false }
-            input.kb.screenshot = down
-        case kVK_ANSI_X:                    input.kb.pulse = down   // perk: radial pulse (level 12)
-        case kVK_ANSI_Z:                    input.kb.cloak = down   // perk: cloak (level 9)
         case kVK_ANSI_R, kVK_Return, kVK_ANSI_KeypadEnter:
             input.kb.restart = down
             input.kb.warp = down            // keyboard advances both restart and warp screens
@@ -94,13 +82,17 @@ final class GameView: MTKView {
         case kVK_ANSI_M:                    input.kb.mute = down
         case kVK_ANSI_B:                    input.kb.briefing = down
         case kVK_ANSI_V:                    input.kb.codex = down
-        case kVK_ANSI_Equal, kVK_ANSI_KeypadPlus:
-            input.kb.faster = down
-        case kVK_ANSI_Minus, kVK_ANSI_KeypadMinus:
-            input.kb.slower = down
+        // Keypad aliases for throttle stay live unless the player binds the
+        // keypad keys to something else (bound keys are consumed above).
+        case kVK_ANSI_KeypadPlus:           input.kb.faster = down
+        case kVK_ANSI_KeypadMinus:          input.kb.slower = down
         case kVK_ANSI_C:
             if down, !gamepad.configuring, let win = window {
                 SettingsSheet.present(over: win, gamepad: gamepad)
+            }
+        case kVK_ANSI_K:
+            if down, !gamepad.configuring, let win = window {
+                KeyboardSheet.present(over: win, gamepad: gamepad)
             }
         case kVK_Escape:
             // Esc backs out (closes the briefing/codex screens → title). It no
@@ -110,5 +102,27 @@ final class GameView: MTKView {
             return false
         }
         return true
+    }
+
+    /// Apply a rebindable action to the keyboard input source.
+    private func apply(_ action: KeyAction, down: Bool) {
+        switch action {
+        case .bankLeft:  input.kb.bankLeft = down
+        case .bankRight: input.kb.bankRight = down
+        // Pitch honours the Invert-pitch setting (shared with the gamepad).
+        // Default (off) is flight-stick sense: stick-forward = nose down /
+        // descend, stick-back = nose up / climb. Inverted swaps them. Applied
+        // at key time so the toggle takes effect live.
+        case .pitchForward: if gamepad.invertPitch { input.kb.dive = down }  else { input.kb.climb = down }
+        case .pitchBack:    if gamepad.invertPitch { input.kb.climb = down } else { input.kb.dive = down }
+        case .yawLeft:   input.kb.yawLeft = down    // yaw — full 6DOF (level-3 Axis Unlock)
+        case .yawRight:  input.kb.yawRight = down
+        case .fire:      input.kb.fire = down
+        case .throttleUp:   input.kb.faster = down
+        case .throttleDown: input.kb.slower = down
+        case .pulse:     input.kb.pulse = down      // perk: radial pulse (level 12)
+        case .cloak:     input.kb.cloak = down      // perk: cloak (level 9)
+        case .screenshot: input.kb.screenshot = down   // flag-gated (not active otherwise)
+        }
     }
 }

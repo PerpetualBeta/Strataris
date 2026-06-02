@@ -89,15 +89,14 @@ Deferred items, not yet scheduled. Pick from here when ready.
       fallback. (Stick-axis remap / per-controller profiles still future work.)
 
 ## Input (cont.)
-- [ ] **Keyboard configure sheet** — a rebinding UI for keyboard players,
-      mirroring the controller sheet (`SettingsSheet`). Today the keyboard map is
-      hardcoded in `GameView.set(keyCode:)` (arrows = steer/pitch, Space = fire,
-      X/Z perks, etc.) with no way to change it. Needs: a `keyBindings` store in
-      `GameSettings` (action → keyCode), a key-capture sheet (click an action →
-      press a key), reset-to-defaults, and `GameView` routing keyDown/Up through
-      the bindings instead of the fixed `switch`. Pair it with the existing
-      controller sheet so both input methods are configurable. (Pitch already
-      honours the shared Invert-pitch setting.)
+- [x] **Keyboard configure sheet** — done. `KeyboardSheet` (K, or Keyboard… in
+      the app menu) mirrors the controller sheet: every flight/combat action
+      (steer, pitch, yaw, fire, throttle, pulse, cloak) rebinds by clicking the
+      action then pressing a key; conflicts swap so everything stays bound;
+      reset-to-defaults; persisted via `GameSettings.keyBindings`. `GameView`
+      routes key events through `KeyBindings` first, with menu/system keys
+      (P/M/B/V/R/Esc/C/K) fixed and refused during capture. Pitch honours the
+      shared Invert-pitch setting.
 
 ## Flight model (6DOF — exp/6dof branch)
 - [x] **Flight Envelope Trim control** — done. FLIGHT TRIM section in the

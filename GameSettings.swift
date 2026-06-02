@@ -21,6 +21,7 @@ final class GameSettings {
         static let fireConfirms = "fireConfirms"
         static let leftWarp    = "leftWarp"
         static let padBindings = "padBindings"
+        static let keyBindings = "keyBindings"
         static let trimAgility   = "trimAgility"
         static let trimYaw       = "trimYaw"
         static let trimAutoLevel = "trimAutoLevel"
@@ -64,5 +65,12 @@ final class GameSettings {
     var padBindings: [String: String] {
         get { d.dictionary(forKey: Key.padBindings) as? [String: String] ?? [:] }
         set { d.set(newValue, forKey: Key.padBindings) }
+    }
+
+    // Keyboard rebinds: [KeyAction.rawValue: virtual key code]. Empty until the
+    // player changes something; KeyBindings falls back to per-action defaults.
+    var keyBindings: [String: Int] {
+        get { d.dictionary(forKey: Key.keyBindings) as? [String: Int] ?? [:] }
+        set { d.set(newValue, forKey: Key.keyBindings) }
     }
 }

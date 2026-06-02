@@ -116,6 +116,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let controller = NSMenuItem(title: "Controller…", action: #selector(openController), keyEquivalent: "")
         controller.target = self
         appMenu.addItem(controller)
+        let keyboard = NSMenuItem(title: "Keyboard…", action: #selector(openKeyboard), keyEquivalent: "")
+        keyboard.target = self
+        appMenu.addItem(keyboard)
 
         appMenu.addItem(.separator())
 
@@ -175,6 +178,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc func openController() {
         guard let win = window, !gamepad.configuring else { return }
         SettingsSheet.present(over: win, gamepad: gamepad)
+    }
+
+    @objc func openKeyboard() {
+        guard let win = window, !gamepad.configuring else { return }
+        KeyboardSheet.present(over: win, gamepad: gamepad)
     }
 
     @objc func showAbout() {

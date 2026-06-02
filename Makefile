@@ -48,6 +48,7 @@ SWIFT_SOURCES    := main.swift \
                     GameSettings.swift \
                     FeatureFlags.swift \
                     SettingsSheet.swift \
+                    KeyboardSheet.swift \
                     OptionsSheet.swift
 
 PACKAGE_TYPE     := zip

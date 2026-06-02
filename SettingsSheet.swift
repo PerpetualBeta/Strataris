@@ -62,7 +62,10 @@ final class SettingsSheet: NSObject {
         statusLabel.font = mono(12, .semibold)
         previewLabel.font = mono(13, .medium)
 
-        let fixed = NSTextField(wrappingLabelWithString: "LEFT STICK     steer · pitch (up = dive)")
+        let fixed = NSTextField(wrappingLabelWithString: """
+            LEFT STICK     steer · pitch (up = dive)
+            RIGHT STICK    yaw (full 6DOF — level-3 Axis Unlock)
+            """)
         fixed.font = mono(11)
         fixed.textColor = .secondaryLabelColor
 
@@ -100,7 +103,7 @@ final class SettingsSheet: NSObject {
         fireStart.font = mono(12)
         fireStart.state = gamepad.fireConfirms ? .on : .off
 
-        let hint = NSTextField(labelWithString: "Pitch invert & deadzone are in Settings (⌘,).  Keyboard always works (invert applies to it too).")
+        let hint = NSTextField(labelWithString: "Pitch invert & deadzone are in Settings (⌘,).  Keyboard mapping is under Keyboard… (K).")
         hint.font = mono(10)
         hint.textColor = .tertiaryLabelColor
 
