@@ -103,13 +103,12 @@ Deferred items, not yet scheduled. Pick from here when ready.
       honours the shared Invert-pitch setting.)
 
 ## Flight model (6DOF — exp/6dof branch)
-- [ ] **Flight Envelope Trim control** — let the player tune the pitch/roll (and
-      probably yaw) handling to her liking: a settings control exposing the
-      angular-rate / responsiveness of each axis (e.g. slow/precise ↔ twitchy),
-      and likely auto-level strength in the restricted envelope. Persist via
-      `GameSettings` (like invertPitch/deadzone). The spike currently hardcodes
-      the rates in `Spike6DOFController` (pitch/roll 1.9, yaw 1.1 rad/s); these
-      become the trim defaults. Surface in the Options/Controller sheet.
+- [x] **Flight Envelope Trim control** — done. FLIGHT TRIM section in the
+      Settings sheet (⌘,): Agility (pitch/roll), Yaw (full 6DOF) and Auto-level
+      sliders as multipliers on the tuned rates (centre tick = 1.0 default,
+      auto-level can go to 0 = hold attitude). Persisted via `GameSettings`
+      (`trimAgility`/`trimYaw`/`trimAutoLevel`), applied live in
+      `Renderer.updateMeshFlight` to both envelopes.
 
 ## Front-end / narrative screens
 - [x] **Back-story screen** — done. Mission-briefing crawl (`.briefing` state /

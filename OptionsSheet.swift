@@ -44,7 +44,7 @@ final class OptionsSheet: NSObject {
         self.gamepad = gamepad
         self.highScores = highScores
         self.parent = parent
-        sheet = SheetWindow(contentRect: NSRect(x: 0, y: 0, width: 420, height: 430),
+        sheet = SheetWindow(contentRect: NSRect(x: 0, y: 0, width: 420, height: 580),
                             styleMask: [.titled], backing: .buffered, defer: false)
         super.init()
         sheet.onCancel = { [weak self] in self?.done() }
@@ -88,6 +88,19 @@ final class OptionsSheet: NSObject {
         ctrlHint.font = mono(10)
         ctrlHint.textColor = .tertiaryLabelColor
 
+        // ── Flight trim ──
+        let trimHdr = header("FLIGHT TRIM")
+        let t = GameSettings.shared
+        let agility = trimRow("Agility", value: t.trimAgility, min: 0.25, max: 1.75,
+                              action: #selector(agilityChanged(_:)))
+        let yawT = trimRow("Yaw", value: t.trimYaw, min: 0.25, max: 1.75,
+                           action: #selector(yawTrimChanged(_:)))
+        let levelT = trimRow("Auto-level", value: t.trimAutoLevel, min: 0, max: 2, ticks: 9,
+                             action: #selector(autoLevelChanged(_:)))
+        let trimHint = NSTextField(labelWithString: "Handling response: pitch/roll · yaw (full 6DOF) · hands-off recovery. Centre = tuned defaults.")
+        trimHint.font = mono(10)
+        trimHint.textColor = .tertiaryLabelColor
+
         // ── Data ──
         let dataHdr = header("DATA")
         let reset = NSButton(title: "Reset High Scores…", target: self, action: #selector(resetScores))
@@ -100,6 +113,7 @@ final class OptionsSheet: NSObject {
         let stack = NSStackView(views: [title,
                                         audioHdr, music, sfx, voice,
                                         separator(), controlsHdr, invert, dzRow, ctrlHint,
+                                        separator(), trimHdr, agility, yawT, levelT, trimHint,
                                         separator(), dataHdr, reset,
                                         separator(), done])
         stack.orientation = .vertical
@@ -134,6 +148,25 @@ final class OptionsSheet: NSObject {
         label.widthAnchor.constraint(equalToConstant: 44).isActive = true
 
         let row = NSStackView(views: [nameLabel, slider, label])
+        row.orientation = .horizontal
+        row.spacing = 10
+        return row
+    }
+
+    /// A "LABEL  [slider]" row for a flight-trim multiplier. Ranges are chosen
+    /// so the CENTRE tick lands exactly on 1.0 — the tuned default.
+    private func trimRow(_ name: String, value: Float, min: Double, max: Double,
+                         ticks: Int = 7, action: Selector) -> NSStackView {
+        let nameLabel = NSTextField(labelWithString: name)
+        nameLabel.font = mono(12)
+        nameLabel.widthAnchor.constraint(equalToConstant: 90).isActive = true
+
+        let slider = NSSlider(value: Double(value), minValue: min, maxValue: max, target: self, action: action)
+        slider.controlSize = .small
+        slider.numberOfTickMarks = ticks
+        slider.widthAnchor.constraint(equalToConstant: 200).isActive = true
+
+        let row = NSStackView(views: [nameLabel, slider])
         row.orientation = .horizontal
         row.spacing = 10
         return row
@@ -174,6 +207,9 @@ final class OptionsSheet: NSObject {
     }
     @objc private func invertToggled(_ s: NSButton) { gamepad.invertPitch = (s.state == .on) }
     @objc private func deadzoneChanged(_ s: NSSlider) { gamepad.deadzone = Float(s.doubleValue) }
+    @objc private func agilityChanged(_ s: NSSlider) { GameSettings.shared.trimAgility = Float(s.doubleValue) }
+    @objc private func yawTrimChanged(_ s: NSSlider) { GameSettings.shared.trimYaw = Float(s.doubleValue) }
+    @objc private func autoLevelChanged(_ s: NSSlider) { GameSettings.shared.trimAutoLevel = Float(s.doubleValue) }
 
     @objc private func resetScores() {
         let alert = NSAlert()

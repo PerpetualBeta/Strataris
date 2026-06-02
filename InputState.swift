@@ -11,6 +11,7 @@ final class InputState {
     struct Controls {
         var bankLeft = false, bankRight = false
         var climb = false, dive = false
+        var yawLeft = false, yawRight = false   // full 6DOF only (level-3 Axis Unlock)
         var faster = false, slower = false
         var fire = false
         var pause = false, restart = false, mute = false
@@ -31,6 +32,8 @@ final class InputState {
     var bankRight: Bool { kb.bankRight || gp.bankRight }
     var climb: Bool     { kb.climb     || gp.climb }
     var dive: Bool      { kb.dive      || gp.dive }
+    var yawLeft: Bool   { kb.yawLeft   || gp.yawLeft }
+    var yawRight: Bool  { kb.yawRight  || gp.yawRight }
     var faster: Bool    { kb.faster    || gp.faster }
     var slower: Bool    { kb.slower    || gp.slower }
     var fire: Bool      { kb.fire      || gp.fire }

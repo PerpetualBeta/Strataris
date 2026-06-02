@@ -78,6 +78,8 @@ final class GameView: MTKView {
         case kVK_UpArrow:   if gamepad.invertPitch { input.kb.dive = down }  else { input.kb.climb = down }
         case kVK_DownArrow: if gamepad.invertPitch { input.kb.climb = down } else { input.kb.dive = down }
         case kVK_Space:                     input.kb.fire = down    // Space is always fire
+        case kVK_ANSI_A:                    input.kb.yawLeft = down  // yaw — full 6DOF (level-3 Axis Unlock)
+        case kVK_ANSI_D:                    input.kb.yawRight = down
         case kVK_ANSI_F:
             // Feature flag: F grabs a screenshot. On its own key (not Space) so
             // keyboard-only players can still fire. Gamepad uses its own binding.

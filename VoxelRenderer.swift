@@ -1456,21 +1456,24 @@ final class VoxelRenderer {
         }
     }
 
-    /// Centred end-of-game banner over a darkened band.
-    func drawBanner(title: String, subtitle: String) {
+    /// Centred end-of-game banner over a darkened band. `opacity` < 1 ghosts it
+    /// (lighter band dim + translucent text) so the world stays visible behind —
+    /// e.g. free-flying on the PLANET CLEARED screen.
+    func drawBanner(title: String, subtitle: String, opacity: Float = 1) {
         let fb = framebuffer
         let bandY = height / 2 - 24, bandH = 50
+        let keep = 1 - 0.68 * opacity                     // opacity 1 → the usual 0.32 dim
         for yy in max(0, bandY)..<min(height, bandY + bandH) {
             let row = yy * width
-            for xx in 0..<width { fb[row + xx] = darken(fb[row + xx], 0.32) }
+            for xx in 0..<width { fb[row + xx] = darken(fb[row + xx], keep) }
         }
         let tScale = 3
         let tw = Font.width(title, scale: tScale)
         Font.draw(title, into: fb, w: width, h: height, x: (width - tw) / 2, y: height / 2 - 16,
-                  scale: tScale, color: packRGBA(255, 225, 110))
+                  scale: tScale, color: packRGBA(255, 225, 110), alpha: opacity)
         let sw = Font.width(subtitle, scale: 1)
         Font.draw(subtitle, into: fb, w: width, h: height, x: (width - sw) / 2, y: height / 2 + 14,
-                  scale: 1, color: packRGBA(230, 236, 246))
+                  scale: 1, color: packRGBA(230, 236, 246), alpha: opacity)
     }
 }
 
