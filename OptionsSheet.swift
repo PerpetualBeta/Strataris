@@ -68,7 +68,7 @@ final class OptionsSheet: NSObject {
 
         // ── Controls ──
         let controlsHdr = header("CONTROLS")
-        let invert = NSButton(checkboxWithTitle: "Invert pitch (stick up = climb)",
+        let invert = NSButton(checkboxWithTitle: "Invert pitch (up = climb, keyboard + stick)",
                               target: self, action: #selector(invertToggled(_:)))
         invert.font = mono(12)
         invert.state = gamepad.invertPitch ? .on : .off

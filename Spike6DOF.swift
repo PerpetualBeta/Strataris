@@ -92,9 +92,41 @@ struct Camera6DOF {
         return Camera6DOF(position: position, orientation: simd_quatf(m))
     }
 
+    /// Build a restricted-envelope view directly from the game's flight scalars
+    /// (heading/pitch/bank in radians), matching `flyRestricted`'s orientation
+    /// construction. Used in Milestone-1 integration where the legacy `Camera`
+    /// stays authoritative and the mesh view is derived from it each frame.
+    static func restricted(position: SIMD3<Float>, heading: Float, pitch: Float,
+                           bank: Float, speed: Float) -> Camera6DOF {
+        var c = Camera6DOF(position: position, orientation: levelBase)
+        c.mode = .restricted; c.heading = heading; c.pitch = pitch; c.bank = bank; c.speed = speed
+        let qYaw   = simd_quatf(angle: heading, axis: SIMD3(0, 0, 1))
+        let qPitch = simd_quatf(angle: pitch,   axis: SIMD3(1, 0, 0))
+        let qBank  = simd_quatf(angle: bank,    axis: SIMD3(0, 0, -1))
+        c.orientation = qYaw * levelBase * qPitch * qBank
+        return c
+    }
+
     var forward: SIMD3<Float> { orientation.act(SIMD3(0, 0, -1)) }
     var up:      SIMD3<Float> { orientation.act(SIMD3(0, 1, 0)) }
     var right:   SIMD3<Float> { orientation.act(SIMD3(1, 0, 0)) }
+
+    /// Forward speed (world units/sec). Carried on the camera so the game's HUD
+    /// readout and engine-audio pitch read it the same way they read the legacy
+    /// `Camera.speed`.
+    var speed: Float = 90
+
+    // Legacy-scalar bridge: derive the (heading, pitch, bank) the 2D HUD/radar
+    // expect from the quaternion, so call sites never touch the orientation.
+    // All mode-independent (valid in both restricted and full envelopes).
+
+    /// Heading in the game's yaw convention, where level forward = (-sin a, -cos a).
+    /// Feeds `drawRadar` so the scope spins correctly.
+    var groundHeading: Float { let f = forward; return atan2f(-f.x, -f.y) }
+    /// Nose elevation above the horizon (radians); feeds the attitude dial.
+    var pitchAngle: Float { asinf(max(-1, min(1, forward.z))) }
+    /// Bank/roll about the forward axis (radians); feeds the attitude dial.
+    var bankAngle: Float { let r = right, u = up; return atan2f(-r.z, u.z) }
 
     func viewMatrix() -> simd_float4x4 {
         let r = right, u = up, b = -forward          // camera local +Z points backward
@@ -105,6 +137,25 @@ struct Camera6DOF {
 
     func projectionMatrix(aspect: Float) -> simd_float4x4 {
         perspectiveRH(fovY: fovY, aspect: aspect, near: near, far: far)
+    }
+
+    /// Project a world point to framebuffer pixels (origin top-left, matching the
+    /// rendered colour texture), returning the view-forward `depth` (>0 = in front)
+    /// and `radiusScale` — the pixels-per-world-unit at that depth, so callers can
+    /// size a reticle/lock box exactly as the perspective draw does. nil if behind
+    /// the camera or well off-screen.
+    func project(_ world: SIMD3<Float>, width: Int, height: Int)
+        -> (x: Float, y: Float, depth: Float, radiusScale: Float)? {
+        let aspect = Float(width) / Float(height)
+        let clip = projectionMatrix(aspect: aspect) * (viewMatrix() * SIMD4<Float>(world, 1))
+        let depth = clip.w                          // = view-forward distance for this proj
+        if depth <= 0.5 { return nil }              // behind / on the camera plane
+        let ndcX = clip.x / clip.w, ndcY = clip.y / clip.w
+        if abs(ndcX) > 1.4 || abs(ndcY) > 1.4 { return nil }   // generous off-screen cull
+        let sx = (ndcX * 0.5 + 0.5) * Float(width)
+        let sy = (1 - (ndcY * 0.5 + 0.5)) * Float(height)      // flip V (texture origin top-left)
+        let focalPx = Float(height) * 0.5 / tanf(fovY * 0.5)
+        return (sx, sy, depth, focalPx / depth)
     }
 
     /// Apply body-frame rotations (radians). Right-multiplying keeps the axes in
@@ -255,7 +306,7 @@ final class MeshTerrainRenderer {
     // Streaming terrain patch: a fixed-size grid that recenters on the camera as
     // it flies. The heightmap wraps (Terrain & mask), so re-sampling a moving
     // window gives seamless, edgeless terrain in every direction.
-    private let terrain: Terrain
+    private var terrain: Terrain            // swapped on warp via setTerrain (pipelines reused)
     private let patchN: Int                 // cells per side
     private let vertsPerSide: Int           // patchN + 1
     private let recenterStep: Int           // rebuild once the camera drifts this many cells
@@ -268,11 +319,9 @@ final class MeshTerrainRenderer {
     private var activeVB = 0
     private var centerCell: SIMD2<Int>      // patch centre, world coords (quantised to stride)
     private var building = false
+    private var forceRebuild = false        // heightfield changed (e.g. a base crumbled) → rebuild the patch
     private let buildQueue = DispatchQueue(label: "cc.jorviksoftware.strataris.meshbuild")
 
-    private let markerVBuf: MTLBuffer
-    private let markerIBuf: MTLBuffer
-    private let markerIndexCount: Int
 
     private static let shaderSource = """
     #include <metal_stdlib>
@@ -529,29 +578,6 @@ final class MeshTerrainRenderer {
                                                        center: SIMD2<Int>(patchCenterX, patchCenterY), stride: 1)
         verts0.withUnsafeBytes { raw in pool[0].contents().copyMemory(from: raw.baseAddress!, byteCount: raw.count) }
 
-        // A single bright marker object (a small pyramid) sitting on the terrain,
-        // to confirm depth occlusion against the hills in the same pass.
-        let mx = Float(patchCenterX), my = Float(patchCenterY - 40)
-        let mz = terrain.heightF(mx, my) + 6
-        let s: Float = 16, hgt: Float = 34
-        let apex = SIMD3<Float>(mx, my, mz + hgt)
-        let base = [SIMD3<Float>(mx - s, my - s, mz), SIMD3<Float>(mx + s, my - s, mz),
-                    SIMD3<Float>(mx + s, my + s, mz), SIMD3<Float>(mx - s, my + s, mz)]
-        let mcol = SIMD4<Float>(1.0, 0.25, 0.2, 1)
-        var mverts = [MeshVertex]()
-        for k in 0..<4 {
-            mverts.append(MeshVertex(pos: base[k], color: mcol))
-            mverts.append(MeshVertex(pos: base[(k + 1) % 4], color: mcol))
-            mverts.append(MeshVertex(pos: apex, color: SIMD4(1, 0.6, 0.3, 1)))
-        }
-        let micount = mverts.count
-        var midx = [UInt32](0..<UInt32(micount))
-        self.markerIndexCount = micount
-        guard let mvb = device.makeBuffer(bytes: mverts, length: mverts.count * MemoryLayout<MeshVertex>.stride),
-              let mib = device.makeBuffer(bytes: &midx, length: midx.count * MemoryLayout<UInt32>.stride)
-        else { return nil }
-        self.markerVBuf = mvb; self.markerIBuf = mib
-
         // Per-kind craft meshes → GPU buffers (built once).
         let kinds: [(EnemyKind, Mesh)] = [(.fighter, .fighter()), (.destroyer, .destroyer()),
                                           (.drone, .drone()), (.mothership, .mothership())]
@@ -628,7 +654,10 @@ final class MeshTerrainRenderer {
         let q = Float(stride)
         let cell = SIMD2<Int>(Int((pos.x / q).rounded()) * stride, Int((pos.y / q).rounded()) * stride)
         let drift = max(abs(cell.x - centerCell.x), abs(cell.y - centerCell.y))
-        if stride == cellStride && drift < recenterStep * stride { return }
+        // A forced rebuild (heightfield mutated under the patch) overrides the
+        // drift/LOD short-circuit so a crumbling base shows up promptly.
+        if !forceRebuild && stride == cellStride && drift < recenterStep * stride { return }
+        forceRebuild = false
         building = true
         if sync {
             swapIn(MeshTerrainRenderer.buildVertices(terrain: terrain, patchN: patchN, center: cell, stride: stride),
@@ -674,7 +703,7 @@ final class MeshTerrainRenderer {
         enc.setFragmentBytes(&skyU, length: MemoryLayout<SkyUniforms>.stride, index: 0)
         enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
 
-        // Terrain + marker (depth-tested).
+        // Terrain (depth-tested).
         // Fog fades terrain into the horizon colour before the patch edge, so the
         // seam where the mesh stops is hidden (the sky uses the same horizon hue).
         var u = MeshUniforms(mvp: vp,
@@ -688,9 +717,6 @@ final class MeshTerrainRenderer {
         enc.setVertexBuffer(vbufs[activeVB], offset: 0, index: 0)
         enc.drawIndexedPrimitives(type: .triangle, indexCount: indexCount,
                                   indexType: .uint32, indexBuffer: ibuf, indexBufferOffset: 0)
-        enc.setVertexBuffer(markerVBuf, offset: 0, index: 0)
-        enc.drawIndexedPrimitives(type: .triangle, indexCount: markerIndexCount,
-                                  indexType: .uint32, indexBuffer: markerIBuf, indexBufferOffset: 0)
 
         // Craft (depth-tested, lit, distance-faded).
         if !entities.isEmpty {
@@ -748,6 +774,69 @@ final class MeshTerrainRenderer {
         }
         enc.endEncoding()
         return cmd
+    }
+
+    /// Force the next `recenterIfNeeded` to rebuild the patch even if the camera
+    /// hasn't drifted — call when the heightfield itself changed under the patch
+    /// (a structure took damage / was destroyed and re-stamped the terrain).
+    func markTerrainDirty() { forceRebuild = true }
+
+    /// Swap the heightfield this renderer streams (a new planet on warp), reusing
+    /// all pipelines/textures (no shader recompile). Rebuilds the active patch
+    /// synchronously so the very next frame shows the new world. Use for loads /
+    /// restarts (off the hot path); for warps, prefer stage/commit below.
+    func setTerrain(_ t: Terrain, centerX: Int = 512, centerY: Int = 512) {
+        terrain = t
+        building = false; forceRebuild = false
+        let center = SIMD2<Int>(centerX, centerY)
+        swapIn(MeshTerrainRenderer.buildVertices(terrain: t, patchN: patchN, center: center, stride: 1),
+               center: center, stride: 1)
+    }
+
+    private var stagedVerts: [MeshVertex]?
+    private var stagedTerrain: Terrain?
+    private var stagedCenter = SIMD2<Int>(512, 512)
+
+    /// Build the patch for an upcoming terrain off the main thread (during the
+    /// warp cut-scene, alongside the async planet gen) so the swap-in at
+    /// `commitStagedTerrain` is instant — no hitch when the new world drops in.
+    func stageTerrain(_ t: Terrain, centerX: Int = 512, centerY: Int = 512) {
+        let center = SIMD2<Int>(centerX, centerY)
+        let n = patchN
+        buildQueue.async { [weak self] in
+            let v = MeshTerrainRenderer.buildVertices(terrain: t, patchN: n, center: center, stride: 1)
+            DispatchQueue.main.async {
+                self?.stagedVerts = v; self?.stagedTerrain = t; self?.stagedCenter = center
+            }
+        }
+    }
+
+    /// Activate a previously `stageTerrain`'d patch instantly. If staging hasn't
+    /// finished (rare), falls back to a synchronous build of `fallback`.
+    func commitStagedTerrain(fallback: Terrain, centerX: Int = 512, centerY: Int = 512) {
+        if let v = stagedVerts, let st = stagedTerrain {
+            terrain = st; building = false; forceRebuild = false
+            swapIn(v, center: stagedCenter, stride: 1)
+            stagedVerts = nil; stagedTerrain = nil
+        } else {
+            setTerrain(fallback, centerX: centerX, centerY: centerY)
+        }
+    }
+
+    /// Render one frame and copy the colour texture straight into a packed-RGBA
+    /// `UInt32` framebuffer (the game's CPU framebuffer), so the existing 2D HUD /
+    /// cockpit / cutscene draws can composite on top. The texture is `rgba8Unorm`
+    /// (bytes R,G,B,A) which is bit-identical to the framebuffer's packed layout
+    /// (R | G<<8 | B<<16), so the bytes drop in with no conversion.
+    func renderInto(_ framebuffer: UnsafeMutablePointer<UInt32>, camera: Camera6DOF,
+                    entities: [(kind: EnemyKind, model: simd_float4x4)] = [],
+                    fx: [Billboard] = []) {
+        guard let cmd = encode(camera: camera, entities: entities, fx: fx) else { return }
+        cmd.commit(); cmd.waitUntilCompleted()
+        framebuffer.withMemoryRebound(to: UInt8.self, capacity: width * height * 4) { bytes in
+            colorTex.getBytes(bytes, bytesPerRow: width * 4,
+                              from: MTLRegionMake2D(0, 0, width, height), mipmapLevel: 0)
+        }
     }
 
     /// Render one frame and read the colour texture back as RGB bytes (headless).
@@ -849,6 +938,26 @@ enum Spike6DOF {
             Billboard(center: gz(486, 290, 38), size: 5,  color: SIMD4(1.0, 1.0, 0.6, 1.0), additive: true),
         ]
         writePPM(r.renderToRGB(camera: ecam, entities: ents, fx: fxStand), w: w, h: h, path: "/tmp/strataris_6dof_enemies.ppm")
+
+        // Structures: bases are stamped into the heightfield, so they must render
+        // as raised, recoloured mesh with no extra geometry — and a destroyed base
+        // must vanish once the patch is rebuilt (the markTerrainDirty path).
+        let sterr = Terrain(seed: Renderer6DOFSeed)
+        let bases = StructureField(terrain: sterr, around: 512, cy: 512, count: 5)
+        if let sr = MeshTerrainRenderer(device: device, terrain: sterr, width: w, height: h),
+           let b0 = bases.structures.first {
+            let bz = sterr.heightF(b0.x, b0.y)
+            let campos = SIMD3<Float>(b0.x + 40, b0.y + 170, bz + 80)
+            let fwd = simd_normalize(SIMD3<Float>(b0.x, b0.y, bz + 10) - campos)
+            let scam = Camera6DOF.start(forward: fwd, position: campos)
+            sr.recenterIfNeeded(around: scam.position, sync: true)
+            writePPM(sr.renderToRGB(camera: scam), w: w, h: h, path: "/tmp/strataris_6dof_structures.ppm")
+            bases.destroy(0)                          // flatten it back to pristine ground
+            sr.markTerrainDirty()
+            sr.recenterIfNeeded(around: scam.position, sync: true)
+            writePPM(sr.renderToRGB(camera: scam), w: w, h: h, path: "/tmp/strataris_6dof_structures_destroyed.ppm")
+            print("6DOF: wrote structures + structures_destroyed PPMs (base 0 at \(Int(b0.x)),\(Int(b0.y)))")
+        }
 
         // Rough timing (GPU fill is trivial at 480×270; this is a sanity floor).
         let t0 = CACurrentMediaTime()

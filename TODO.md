@@ -91,6 +91,17 @@ Deferred items, not yet scheduled. Pick from here when ready.
       the old "left trigger warps" toggle was retired. Keyboard stays a
       fallback. (Stick-axis remap / per-controller profiles still future work.)
 
+## Input (cont.)
+- [ ] **Keyboard configure sheet** — a rebinding UI for keyboard players,
+      mirroring the controller sheet (`SettingsSheet`). Today the keyboard map is
+      hardcoded in `GameView.set(keyCode:)` (arrows = steer/pitch, Space = fire,
+      X/Z perks, etc.) with no way to change it. Needs: a `keyBindings` store in
+      `GameSettings` (action → keyCode), a key-capture sheet (click an action →
+      press a key), reset-to-defaults, and `GameView` routing keyDown/Up through
+      the bindings instead of the fixed `switch`. Pair it with the existing
+      controller sheet so both input methods are configurable. (Pitch already
+      honours the shared Invert-pitch setting.)
+
 ## Flight model (6DOF — exp/6dof branch)
 - [ ] **Flight Envelope Trim control** — let the player tune the pitch/roll (and
       probably yaw) handling to her liking: a settings control exposing the

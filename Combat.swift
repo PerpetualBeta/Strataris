@@ -33,17 +33,25 @@ final class Combat {
 
     /// `lockedTargetIndex`: when the Targeting Computer has a lock, fire is
     /// directed at that (moving) craft instead of whatever sits under the reticle.
+    /// `useReticleFallback`: when true (voxel renderer), an absent
+    /// `lockedTargetIndex` falls back to the yaw-only `voxel.targetedEnemy` hit
+    /// test. The mesh renderer projects through the quaternion camera instead and
+    /// passes the resolved target in `lockedTargetIndex`, so it sets this false —
+    /// a nil target then means "fire but miss" (tracer only), as intended.
     func update(dt: Float, input: InputState, camera: Camera,
                 field: EnemyField, voxel: VoxelRenderer, smoke: SmokeField,
-                crosshairX: Float, crosshairY: Float, lockedTargetIndex: Int? = nil) {
+                crosshairX: Float, crosshairY: Float, lockedTargetIndex: Int? = nil,
+                useReticleFallback: Bool = true) {
         fireCooldown = max(0, fireCooldown - dt)
         tracerTimer = max(0, tracerTimer - dt)
 
         if input.fire && fireCooldown <= 0 {
             fireCooldown = fireInterval
             tracerTimer = 0.07
-            let target = lockedTargetIndex ?? voxel.targetedEnemy(in: field, camera: camera,
-                                                                  crosshairX: crosshairX, crosshairY: crosshairY)
+            let target = useReticleFallback
+                ? (lockedTargetIndex ?? voxel.targetedEnemy(in: field, camera: camera,
+                                                            crosshairX: crosshairX, crosshairY: crosshairY))
+                : lockedTargetIndex
             if let idx = target {
                 let e = field.enemies[idx]
                 explosions.append(Explosion(x: e.x, y: e.y, z: e.z, age: 0))
