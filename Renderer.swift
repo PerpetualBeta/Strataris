@@ -414,9 +414,29 @@ final class Renderer: NSObject, MTKViewDelegate {
         camera.pitch = camera6.pitchAngle / 0.5 * 80
     }
 
-    /// Craft as GPU entity transforms (kind + world model matrix).
+    /// Re-express a world position in the camera's wrap neighbourhood: the map
+    /// tiles every `terrain.size` units, so pick the image of (x, y) nearest the
+    /// camera — otherwise craft/effects across the wrap seam render a full map
+    /// away (fogged out, invisible) instead of right next door. Mirrors the
+    /// wrapDelta the voxel `project` / radar / AI all apply.
+    private func meshWrapped(_ x: Float, _ y: Float, _ z: Float) -> SIMD3<Float> {
+        let size = Float(terrain.size), h = size * 0.5
+        func near(_ v: Float, _ c: Float) -> Float {
+            var d = (v - c).truncatingRemainder(dividingBy: size)
+            if d > h { d -= size } else if d < -h { d += size }
+            return c + d
+        }
+        return SIMD3(near(x, camera6.position.x), near(y, camera6.position.y), z)
+    }
+
+    /// Craft as GPU entity transforms (kind + world model matrix), wrapped into
+    /// the camera's neighbourhood.
     private func meshEntities() -> [(kind: EnemyKind, model: simd_float4x4)] {
-        enemies.enemies.map { (kind: $0.kind, model: enemyModel($0, scale: enemies.scale(for: $0.kind))) }
+        enemies.enemies.map { e in
+            var m = enemyModel(e, scale: enemies.scale(for: e.kind))
+            m.columns.3 = SIMD4<Float>(meshWrapped(e.x, e.y, e.z), 1)
+            return (kind: e.kind, model: m)
+        }
     }
 
     /// Map the live effect state to camera-facing billboards for the 3D pass:
@@ -426,20 +446,20 @@ final class Renderer: NSObject, MTKViewDelegate {
         var fx = [Billboard]()
         for ex in combat.explosions {
             let t = max(0, min(1, ex.age / combat.explosionDuration)), a = 1 - t
-            let size = 16 + t * 34, c = SIMD3<Float>(ex.x, ex.y, ex.z)
+            let size = 16 + t * 34, c = meshWrapped(ex.x, ex.y, ex.z)
             fx.append(Billboard(center: c, size: size,       color: SIMD4(1.0, 0.82, 0.40, a),         additive: true))
             fx.append(Billboard(center: c, size: size * 1.7, color: SIMD4(1.0, 0.45, 0.16, a * 0.55),  additive: true))
         }
         for p in smoke.particles {
-            let t = max(0, min(1, p.age / p.life)), c = SIMD3<Float>(p.x, p.y, p.z)
+            let t = max(0, min(1, p.age / p.life)), c = meshWrapped(p.x, p.y, p.z)
             if p.fire {
                 fx.append(Billboard(center: c, size: 6 + t * 6, color: SIMD4(1.0, 0.6 - t * 0.3, 0.2, (1 - t) * 0.9), additive: true))
             } else {
                 fx.append(Billboard(center: c, size: 7 + t * 14, color: SIMD4(0.5, 0.5, 0.55, (1 - t) * 0.5), additive: false))
             }
         }
-        for s in projectiles.shots { fx.append(Billboard(center: SIMD3(s.x, s.y, s.z), size: 4, color: SIMD4(1, 1, 0.6, 1), additive: true)) }
-        for s in bombs.shots       { fx.append(Billboard(center: SIMD3(s.x, s.y, s.z), size: 5, color: SIMD4(1, 0.5, 0.2, 1), additive: true)) }
+        for s in projectiles.shots { fx.append(Billboard(center: meshWrapped(s.x, s.y, s.z), size: 4, color: SIMD4(1, 1, 0.6, 1), additive: true)) }
+        for s in bombs.shots       { fx.append(Billboard(center: meshWrapped(s.x, s.y, s.z), size: 5, color: SIMD4(1, 0.5, 0.2, 1), additive: true)) }
         return fx
     }
 
@@ -448,7 +468,7 @@ final class Renderer: NSObject, MTKViewDelegate {
     private func meshProject(enemyAt idx: Int) -> (x: Float, y: Float, depth: Float, radiusScale: Float)? {
         guard enemies.enemies.indices.contains(idx) else { return nil }
         let e = enemies.enemies[idx]
-        return camera6.project(SIMD3<Float>(e.x, e.y, e.z),
+        return camera6.project(meshWrapped(e.x, e.y, e.z),
                                width: RenderConfig.width, height: RenderConfig.height)
     }
 
@@ -580,6 +600,9 @@ final class Renderer: NSObject, MTKViewDelegate {
                     audio.whoosh(rising: false)             // re-entry
                     warpCam = Camera.start(over: warpTerrain ?? terrain, renderHeight: RenderConfig.height)
                     warpCam.x = 512; warpCam.y = 512; warpCam.angle = 0
+                    // Mesh mode flies the descent over the NEW world, so commit
+                    // the staged patch now (finalizeWarp's commit becomes a no-op).
+                    if useMesh, let nt = warpTerrain { mesh?.commitStagedTerrain(fallback: nt) }
                 }
                 if warpPhase >= 5 { finalizeWarp(); return }
             }
@@ -591,14 +614,17 @@ final class Renderer: NSObject, MTKViewDelegate {
         audio.engine(on: true, speed: (warpPhase == 0 || warpPhase == 4) ? 260 : 30)
 
         // Draws the cockpit instrument cluster + radar over the cut-scene, so we
-        // stay "in the ship" the whole time (no sudden EVA).
-        func panel(_ vox: VoxelRenderer, _ cam: Camera, _ str: StructureField, _ en: EnemyField, _ t: Terrain) {
+        // stay "in the ship" the whole time (no sudden EVA). The radar scope is
+        // empty in transit (`blips: false`) — contact drops the moment we depart,
+        // and the new world's blips only paint on the descent.
+        func panel(_ vox: VoxelRenderer, _ cam: Camera, _ str: StructureField, _ en: EnemyField, _ t: Terrain,
+                   blips: Bool) {
             let alt = max(0, Int(cam.height - t.heightF(cam.x, cam.y)))
             vox.drawCockpit(score: combat.score, basesStanding: str.standing, basesTotal: str.structures.count,
                             aliens: en.remaining, planetName: PlanetTheme.name(forLevel: level), level: level,
                             speed: Int(cam.speed), altitude: alt,
                             shield: Int(shield), maxShield: Int(maxShield), roll: cam.roll, pitch: cam.pitch)
-            vox.drawRadar(camera: cam, enemies: en, structures: str)
+            vox.drawRadar(camera: cam, enemies: blips ? en : nil, structures: blips ? str : nil)
             chrono(on: vox)
         }
         let labelY = Int(Float(H) * 0.12)
@@ -609,28 +635,39 @@ final class Renderer: NSObject, MTKViewDelegate {
             warpCam.horizon = camera.horizon + p * Float(H) * 0.55
             warpCam.x += -sinf(warpCam.angle) * 36 * dt
             warpCam.y += -cosf(warpCam.angle) * 36 * dt
-            voxel.render(camera: warpCam)
+            if useMesh, let m = mesh {
+                // Same climb through the live engine: the nose lifts as the climb
+                // steepens (the voxel path's rising horizon), so departure matches
+                // gameplay instead of cutting back to the raycaster.
+                let pos = SIMD3<Float>(warpCam.x, warpCam.y, warpCam.height)
+                let c6 = Camera6DOF.restricted(position: pos, heading: warpCam.angle,
+                                               pitch: 0.5 * p, bank: 0, speed: 260)
+                m.recenterIfNeeded(around: pos)
+                m.renderInto(voxel.framebuffer, camera: c6)
+            } else {
+                voxel.render(camera: warpCam)
+            }
             voxel.dimScreen(p > 0.7 ? (p - 0.7) / 0.3 : 0)
-            panel(voxel, warpCam, structures, enemies, terrain)
+            panel(voxel, warpCam, structures, enemies, terrain, blips: false)
             voxel.drawUnicodeCentered("DEPARTING", y: labelY, fontSize: 14, 0.82, 0.9, 1.0)
             present(in: view, from: voxel)
         case 1:   // orbit — the planet we left, shrinking
             voxel.clearSpace(warpTime)
             voxel.drawGlobe(cx: W / 2, cy: H / 2 - Int(18 * p), r: max(1, Int(120 - 84 * p)),
                             base: globeColor(terrain.theme))
-            panel(voxel, warpCam, structures, enemies, terrain)
+            panel(voxel, warpCam, structures, enemies, terrain, blips: false)
             voxel.drawUnicodeCentered("LEAVING ORBIT", y: labelY, fontSize: 14, 0.82, 0.9, 1.0)
             present(in: view, from: voxel)
         case 2:   // hyperspace
             voxel.drawHyperspace(time: warpTime, progress: p)
-            panel(voxel, warpCam, structures, enemies, terrain)
+            panel(voxel, warpCam, structures, enemies, terrain, blips: false)
             voxel.drawUnicodeCentered("HYPERSPACE", y: labelY, fontSize: 16, 0.85, 0.92, 1.0)
             present(in: view, from: voxel)
         case 3:   // approach — the new planet growing
             voxel.clearSpace(warpTime + 11)
             voxel.drawGlobe(cx: W / 2, cy: H / 2, r: Int(20 + 112 * p),
                             base: globeColor(warpTerrain?.theme ?? terrain.theme))
-            panel(voxel, warpCam, structures, enemies, terrain)
+            panel(voxel, warpCam, structures, enemies, terrain, blips: false)
             voxel.drawUnicodeCentered("APPROACHING \(PlanetTheme.name(forLevel: level).uppercased())", y: labelY, fontSize: 13, 0.85, 0.92, 1.0)
             present(in: view, from: voxel)
         default:  // 4: descent — drop into the new world
@@ -639,9 +676,23 @@ final class Renderer: NSObject, MTKViewDelegate {
                 let pe = 1 - (1 - p) * (1 - p)              // ease out
                 warpCam.height = (g + 760) + ((g + 140) - (g + 760)) * pe
                 warpCam.horizon = Float(H) * (0.85 - 0.45 * p)
-                nv.render(camera: warpCam)
+                if useMesh, let m = mesh {
+                    // The staged patch was committed at phase entry, so the mesh
+                    // already holds the NEW world: flare in nose-high and settle
+                    // level as the altitude bleeds off — no renderer cut at the
+                    // playing handoff. No recenter here: the stride-1 patch is
+                    // exactly what gameplay resumes on, and re-LODding for the
+                    // brief high-altitude pass would just thrash rebuilds — the
+                    // close fog at entry reads as re-entry haze burning off.
+                    let pos = SIMD3<Float>(warpCam.x, warpCam.y, warpCam.height)
+                    let c6 = Camera6DOF.restricted(position: pos, heading: warpCam.angle,
+                                                   pitch: 0.45 * (1 - p), bank: 0, speed: 260)
+                    m.renderInto(nv.framebuffer, camera: c6)
+                } else {
+                    nv.render(camera: warpCam)
+                }
                 nv.dimScreen(p < 0.3 ? (0.3 - p) / 0.3 : 0)
-                panel(nv, warpCam, ns, ne, nt)
+                panel(nv, warpCam, ns, ne, nt, blips: true)
                 nv.drawUnicodeCentered("\(PlanetTheme.name(forLevel: level).uppercased())   ·   LEVEL \(level)", y: labelY, fontSize: 14, 0.85, 0.92, 1.0)
                 present(in: view, from: nv)
             }

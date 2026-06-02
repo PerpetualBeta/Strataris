@@ -858,7 +858,7 @@ final class VoxelRenderer {
         Font.draw("SPD \(speed)  ALT \(altitude)", into: fb, w: width, h: height, x: 10, y: height - 12, color: white)
     }
 
-    func drawRadar(camera: Camera, enemies: EnemyField, structures: StructureField) {
+    func drawRadar(camera: Camera, enemies: EnemyField?, structures: StructureField?) {
         let a = camera.angle
         drawRadar(originX: camera.x, originY: camera.y,
                   fwdX: -sinf(a), fwdY: -cosf(a), rightX: cosf(a), rightY: -sinf(a),
@@ -869,9 +869,10 @@ final class VoxelRenderer {
     /// the quaternion camera's *actual* forward/right (its basis handedness differs
     /// from the voxel yaw convention, so re-deriving from a heading would mirror
     /// left/right). `fwd`/`right` need not be unit length (only direction matters).
+    /// nil `enemies`/`structures` draw an empty scope (warp transit — contact lost).
     func drawRadar(originX: Float, originY: Float,
                    fwdX: Float, fwdY: Float, rightX rx: Float, rightY ry: Float,
-                   enemies: EnemyField, structures: StructureField) {
+                   enemies: EnemyField?, structures: StructureField?) {
         // Normalise the supplied basis so blip distances are in world units.
         let fl = max(1e-5, sqrtf(fwdX * fwdX + fwdY * fwdY))
         let rl = max(1e-5, sqrtf(rx * rx + ry * ry))
@@ -915,8 +916,8 @@ final class VoxelRenderer {
             for j in -s...s { for i in -s...s { plot(ix + i, iy + j, color) } }
         }
 
-        for st in structures.structures where st.alive { blip(st.x, st.y, packRGBA(90, 220, 255), 1) }
-        for e in enemies.enemies { blip(e.x, e.y, packRGBA(255, 90, 40), 0) }
+        for st in structures?.structures ?? [] where st.alive { blip(st.x, st.y, packRGBA(90, 220, 255), 1) }
+        for e in enemies?.enemies ?? [] { blip(e.x, e.y, packRGBA(255, 90, 40), 0) }
 
         // Player marker — a small triangle pointing up at the centre.
         let p = packRGBA(120, 255, 140)

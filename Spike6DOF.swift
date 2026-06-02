@@ -237,6 +237,9 @@ private struct MeshUniforms {
 
 private struct SkyUniforms {
     var invViewProj: simd_float4x4
+    var zenith: SIMD4<Float>       // sky hues from the planet theme
+    var horizon: SIMD4<Float>
+    var ground: SIMD4<Float>
 }
 
 private struct MeshVertex {
@@ -395,7 +398,7 @@ final class MeshTerrainRenderer {
     // Full-screen sky: reconstruct the world-space view ray per pixel from the
     // inverse view-projection, then colour by the ray's world-up (z) component
     // so the horizon is a true world plane that tilts and inverts with the camera.
-    struct SkyU { float4x4 invViewProj; };
+    struct SkyU { float4x4 invViewProj; float4 zenith; float4 horizon; float4 ground; };
     struct SOut { float4 position [[position]]; float2 ndc; };
 
     vertex SOut v_sky(uint vid [[vertex_id]]) {
@@ -410,11 +413,9 @@ final class MeshTerrainRenderer {
         float4 fp = u.invViewProj * float4(in.ndc, 1.0, 1.0); fp /= fp.w;
         float3 dir = normalize(fp.xyz - np.xyz);
         float t = dir.z;                                // world up = +z
-        float3 zenith  = float3(0.16, 0.34, 0.62);
-        float3 horizon = float3(0.62, 0.74, 0.86);
-        float3 ground  = float3(0.50, 0.58, 0.66);   // hazy, not dark — blends with fog
-        float3 c = t >= 0.0 ? mix(horizon, zenith, smoothstep(0.0, 0.55, t))
-                            : mix(horizon, ground, smoothstep(0.0, -0.5, t));
+        // Hues come from the planet theme (matches the voxel sky gradient).
+        float3 c = t >= 0.0 ? mix(u.horizon.rgb, u.zenith.rgb, smoothstep(0.0, 0.55, t))
+                            : mix(u.horizon.rgb, u.ground.rgb, smoothstep(0.0, -0.5, t));
         return float4(c, 1.0);
     }
     """
@@ -697,7 +698,18 @@ final class MeshTerrainRenderer {
               let enc = cmd.makeRenderCommandEncoder(descriptor: pass) else { return nil }
 
         // Sky first (fills the background; the horizon plane tilts with the camera).
-        var skyU = SkyUniforms(invViewProj: vp.inverse)
+        // Per-planet atmosphere: sky/haze hues from the terrain's theme, so each
+        // world keeps its own look through the mesh renderer (Vulcan's ash, the
+        // violet Vesper twilight, …). Below-horizon haze is the horizon hue
+        // dimmed a touch, exactly as the old hardcoded blue was.
+        let th = terrain.theme
+        func themeC(_ c: (UInt8, UInt8, UInt8), _ s: Float = 1) -> SIMD4<Float> {
+            SIMD4<Float>(Float(c.0) / 255 * s, Float(c.1) / 255 * s, Float(c.2) / 255 * s, 1)
+        }
+        var skyU = SkyUniforms(invViewProj: vp.inverse,
+                               zenith: themeC(th.skyTop),
+                               horizon: themeC(th.skyHaze),
+                               ground: themeC(th.skyHaze, 0.82))
         enc.setRenderPipelineState(skyPipeline)
         enc.setDepthStencilState(skyDepth)
         enc.setFragmentBytes(&skyU, length: MemoryLayout<SkyUniforms>.stride, index: 0)
@@ -706,10 +718,25 @@ final class MeshTerrainRenderer {
         // Terrain (depth-tested).
         // Fog fades terrain into the horizon colour before the patch edge, so the
         // seam where the mesh stops is hidden (the sky uses the same horizon hue).
+        //
+        // Fog distance follows ALTITUDE continuously rather than jumping with the
+        // discrete LOD stride (which doubles worldHalf at each step — a jarring
+        // snap). Stride k+1 engages at alt = 250·k; fog starts there at the
+        // previous stride's distance and ramps to the new stride's over the next
+        // 150 units of climb, so the horizon recedes/advances smoothly. Clamped
+        // to the LIVE patch's stride so the few frames where an async rebuild
+        // lags the altitude can't push fog past the patch edge.
+        let alt = camera.position.z - terrain.heightF(camera.position.x, camera.position.y)
+        let band = min(3, max(0, Int(alt / 250)))
+        let ramp: Float = band == 0 ? 1
+            : Float(band) + min(1, max(0, (alt - Float(band) * 250) / 150))
+        let strideF = min(Float(cellStride), ramp)
+        let fogFar = Float(patchN / 2) * 0.82 * strideF
+        let fogP = SIMD4<Float>(fogFar * 0.55, fogFar, 0, 0)
         var u = MeshUniforms(mvp: vp,
                              eye: SIMD4<Float>(camera.position, 1),
-                             fogColor: SIMD4<Float>(0.62, 0.74, 0.86, 1),
-                             fogParams: SIMD4<Float>(worldHalf * 0.45, worldHalf * 0.82, 0, 0))
+                             fogColor: themeC(th.skyHaze),
+                             fogParams: fogP)
         enc.setRenderPipelineState(meshPipeline)
         enc.setDepthStencilState(meshDepth)
         enc.setVertexBytes(&u, length: MemoryLayout<MeshUniforms>.stride, index: 1)
@@ -723,7 +750,7 @@ final class MeshTerrainRenderer {
             var eu = EntityUniforms(vp: vp, model: matrix_identity_float4x4,
                                     eye: SIMD4<Float>(camera.position, 1),
                                     light: SIMD4<Float>(simd_normalize(SIMD3<Float>(-1, 0.35, 0.9)), 0),
-                                    fog: SIMD4<Float>(worldHalf * 0.45, worldHalf * 0.82, 0, 0))
+                                    fog: fogP)
             enc.setRenderPipelineState(entityPipeline)
             enc.setDepthStencilState(meshDepth)
             for (kind, model) in entities {
@@ -757,7 +784,7 @@ final class MeshTerrainRenderer {
                                            camRight: SIMD4<Float>(camera.right, 0),
                                            camUp: SIMD4<Float>(camera.up, 0),
                                            eye: SIMD4<Float>(camera.position, 1),
-                                           fog: SIMD4<Float>(worldHalf * 0.45, worldHalf * 0.82, 0, 0))
+                                           fog: fogP)
                 enc.setDepthStencilState(fxDepth)
                 enc.setVertexBuffer(buf, offset: 0, index: 0)
                 enc.setVertexBytes(&bu, length: MemoryLayout<BillboardUniforms>.stride, index: 1)
@@ -812,13 +839,15 @@ final class MeshTerrainRenderer {
     }
 
     /// Activate a previously `stageTerrain`'d patch instantly. If staging hasn't
-    /// finished (rare), falls back to a synchronous build of `fallback`.
+    /// finished (rare), falls back to a synchronous build of `fallback` — unless
+    /// `fallback` is already live (an earlier commit, e.g. at warp-descent start,
+    /// makes the finalize-time call a no-op rather than a redundant sync rebuild).
     func commitStagedTerrain(fallback: Terrain, centerX: Int = 512, centerY: Int = 512) {
         if let v = stagedVerts, let st = stagedTerrain {
             terrain = st; building = false; forceRebuild = false
             swapIn(v, center: stagedCenter, stride: 1)
             stagedVerts = nil; stagedTerrain = nil
-        } else {
+        } else if terrain !== fallback {
             setTerrain(fallback, centerX: centerX, centerY: centerY)
         }
     }
