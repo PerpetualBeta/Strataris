@@ -1,10 +1,10 @@
-# Strataris: Galactic Colony Defence — first-person voxel-terrain shoot-'em-up.
+# Strataris: Galactic Colony Defence — first-person mesh-terrain shoot-'em-up.
 #
 # First NATIVE game in the Jorvik suite (the others — Star Raiders, Rescue
 # on Fractalus, Centipede, Mr. Do!, Gauntlet — are HTML/canvas tributes).
-# Built with swiftc + a runtime-compiled Metal blit shader; the voxel
-# terrain is rendered on the CPU into a low-res framebuffer and upscaled
-# nearest-neighbour for that period-correct pixelated look.
+# Built with swiftc + runtime-compiled Metal shaders; the terrain is a GPU
+# triangle mesh rendered from a quaternion camera into a low-res framebuffer
+# and upscaled nearest-neighbour for that period-correct pixelated look.
 #
 # Release pipeline delegated to the shared `release.mk` from
 # PerpetualBeta/jorvik-release.
@@ -26,7 +26,7 @@ SWIFT_SOURCES    := main.swift \
                     AppDelegate.swift \
                     GameView.swift \
                     Renderer.swift \
-                    VoxelRenderer.swift \
+                    Canvas2D.swift \
                     Terrain.swift \
                     Camera.swift \
                     InputState.swift \
@@ -37,7 +37,7 @@ SWIFT_SOURCES    := main.swift \
                     Combat.swift \
                     Smoke.swift \
                     Font.swift \
-                    Spike6DOF.swift \
+                    MeshTerrain.swift \
                     PlanetTheme.swift \
                     Projectile.swift \
                     TextImage.swift \

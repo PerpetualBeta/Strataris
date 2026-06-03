@@ -1,269 +1,38 @@
-// Strataris — CPU voxel terrain renderer.
+// Strataris — 2D canvas (HUD, cutscenes, codex, text).
 //
-// The Comanche-style "Voxel Space" technique (Kilauea / NovaLogic, 1992):
-// for each screen COLUMN, march a ray forward across the heightmap from
-// near to far; at each step project the sampled terrain height to a screen
-// row and draw the vertical span from there up to the highest pixel already
-// filled in that column (the y-buffer). Front-to-back + y-buffer means each
-// pixel is written at most once and nearer ridges occlude farther ones for
-// free — no depth sorting, no polygons.
-//
-// Output is a packed-RGBA framebuffer the Metal layer uploads as a texture
-// and upscales nearest-neighbour. Deliberately low-res for the period look.
-//
-// This is the engine we'll later hang sprites + HUD off; keeping it a plain
-// CPU pass (no GPU dependency) is also what lets the headless SmokeTest at
-// the bottom exercise it without a window.
+// A packed-RGBA framebuffer the Metal layer uploads as a texture and upscales
+// nearest-neighbour (deliberately low-res for the period look). The GPU mesh
+// renderer reads the 3D frame back INTO this framebuffer, then everything here
+// composites the 2D layer on top: the cockpit dashboard + dials, radar,
+// crosshair / tracers / lock box, damage flash, perk HUD, banners, the warp
+// space cutscenes (starfield / globe / hyperspace), the title logo, the
+// briefing crawl, the rotating-mesh codex, and all the bitmap/Core-Text glyphs.
+// Being a plain CPU canvas (no GPU dependency for the 2D layer) is also what
+// lets the headless SmokeTest at the bottom exercise it without a window.
 
 import Foundation
 import QuartzCore
+import Metal     // SmokeTest's best-effort GPU render check
 
-final class VoxelRenderer {
+final class Canvas2D {
     let width: Int
     let height: Int
     let framebuffer: UnsafeMutablePointer<UInt32>
 
-    private let terrain: Terrain
-    private let ybuf: UnsafeMutablePointer<Float>
-    private let depthBuf: UnsafeMutablePointer<Float>   // per-pixel terrain distance, for sprite occlusion
-    private let sky: UnsafeMutablePointer<UInt32>   // precomputed gradient, one per row
-    private let fog: UInt32                          // haze colour distant terrain fades into
+    /// Map wrap size for the radar scope (the world tiles every `mapSize` units).
+    /// Set by the renderer whenever the terrain changes; the canvas itself holds
+    /// no terrain reference.
+    var mapSize: Float
 
-    init(width: Int, height: Int, terrain: Terrain) {
+    init(width: Int, height: Int, mapSize: Float) {
         self.width = width
         self.height = height
-        self.terrain = terrain
+        self.mapSize = mapSize
         self.framebuffer = .allocate(capacity: width * height)
-        self.ybuf = .allocate(capacity: width)
-        self.depthBuf = .allocate(capacity: width * height)
-        self.sky = .allocate(capacity: height)
-
-        // Sky gradient from this planet's theme: a deep top colour fading to a
-        // pale horizon haze. The haze is also what distant terrain blends into,
-        // so the far clip plane dissolves instead of popping.
-        let st = terrain.theme.skyTop, sh = terrain.theme.skyHaze
-        let topR = Float(st.0), topG = Float(st.1), topB = Float(st.2)
-        let hazR = Float(sh.0), hazG = Float(sh.1), hazB = Float(sh.2)
-        for y in 0..<height {
-            let t = Float(y) / Float(height)
-            let r: Float = topR + (hazR - topR) * t
-            let g: Float = topG + (hazG - topG) * t
-            let b: Float = topB + (hazB - topB) * t
-            sky[y] = packRGBA(UInt8(r), UInt8(g), UInt8(b))
-        }
-        self.fog = packRGBA(UInt8(hazR), UInt8(hazG), UInt8(hazB))
     }
 
     deinit {
         framebuffer.deallocate()
-        ybuf.deallocate()
-        depthBuf.deallocate()
-        sky.deallocate()
-    }
-
-    func render(camera: Camera) {
-        let w = width, h = height
-        let fb = framebuffer
-        let db = depthBuf
-
-        // Clear to the sky gradient; sky is "infinitely" far for depth tests.
-        for y in 0..<h {
-            let c = sky[y]
-            let base = y &* w
-            for x in 0..<w {
-                fb[base &+ x] = c
-                db[base &+ x] = .greatestFiniteMagnitude
-            }
-        }
-
-        // Reset y-buffer to the bottom of the screen.
-        let hF = Float(h)
-        for i in 0..<w { ybuf[i] = hF }
-
-        let sinA = sinf(camera.angle)
-        let cosA = cosf(camera.angle)
-        let camH = camera.height
-        let scale = camera.scaleHeight
-        let horizon = camera.horizon
-        let maxDist = camera.maxDistance
-        let invDist = 1.0 / maxDist
-        let wF = Float(w)
-        let halfW = wF * 0.5
-        let roll = camera.roll          // horizon tilt (banking), pixels-per-column
-
-        // March outward. dz grows with distance: fine detail near, coarse far
-        // (level-of-detail), which also bounds the step count.
-        var z: Float = 1.0
-        var dz: Float = 1.0
-        while z < maxDist {
-            // The two ends of the scan line at this distance, rotated by yaw.
-            // (A 90°-ish frustum — the classic Voxel Space framing.)
-            var plx = (-cosA * z - sinA * z) + camera.x
-            var ply = ( sinA * z - cosA * z) + camera.y
-            let prx = ( cosA * z - sinA * z) + camera.x
-            let pry = (-sinA * z - cosA * z) + camera.y
-            let dx = (prx - plx) / wF
-            let dy = (pry - ply) / wF
-
-            let invZScale = (1.0 / z) * scale
-            let fogT = z * invDist                    // 0 near … 1 far
-
-            for i in 0..<w {
-                let mapH = terrain.heightF(plx, ply)
-                let horizonI = horizon + (Float(i) - halfW) * roll
-                let projected = (camH - mapH) * invZScale + horizonI
-                let top = Int(projected)
-                let bottom = Int(ybuf[i])
-
-                if top < bottom {
-                    // `top` can go negative when terrain projects above the
-                    // top of the screen (flying low beneath a tall peak).
-                    // Clamp the fill to the visible range and store a
-                    // non-negative y-buffer, or a later column forms the
-                    // inverted Range `0 ..< negative` and Swift traps.
-                    let from = max(0, top)
-                    if from < bottom {
-                        let col = fogBlend(terrain.colorAt(plx, ply), fog, fogT)
-                        var idx = from &* w &+ i
-                        for _ in from..<bottom {
-                            fb[idx] = col
-                            db[idx] = z          // nearest terrain claims the pixel first
-                            idx &+= w
-                        }
-                    }
-                    ybuf[i] = Float(from)
-                }
-                plx += dx
-                ply += dy
-            }
-
-            z += dz
-            dz += 0.005
-        }
-    }
-
-    @inline(__always) private func fogBlend(_ c: UInt32, _ f: UInt32, _ t: Float) -> UInt32 {
-        if t <= 0 { return c }
-        let it = 1 - t
-        let r = Float(c & 0xFF) * it + Float(f & 0xFF) * t
-        let g = Float((c >> 8) & 0xFF) * it + Float((f >> 8) & 0xFF) * t
-        let b = Float((c >> 16) & 0xFF) * it + Float((f >> 16) & 0xFF) * t
-        return packRGBA(UInt8(r), UInt8(g), UInt8(b))
-    }
-
-    // MARK: Enemy rendering — flat-shaded 3D hulls (call AFTER render(camera:))
-
-    /// Draw each craft as a small flat-shaded 3D model, rotated to face its
-    /// heading, depth-tested per pixel against the terrain.
-    func drawEnemies(_ field: EnemyField, camera: Camera) {
-        let camX = camera.x, camY = camera.y, camZ = camera.height
-        let lx: Float = -0.4, ly: Float = -0.5, lz: Float = 0.77
-
-        // Far → near, so nearer ships resolve correctly even at equal depths.
-        let order = field.enemies.indices.sorted {
-            sq(field.enemies[$0].x - camX) + sq(field.enemies[$0].y - camY)
-                > sq(field.enemies[$1].x - camX) + sq(field.enemies[$1].y - camY)
-        }
-
-        for ei in order {
-            let e = field.enemies[ei]
-            let mesh = field.mesh(for: e.kind)
-            let scale = field.scale(for: e.kind)
-
-            // Orthonormal basis from the facing vector (fwd, right, up).
-            var fx = e.fwdX, fy = e.fwdY, fz = e.fwdZ
-            let fl = max(0.0001, sqrtf(fx * fx + fy * fy + fz * fz)); fx /= fl; fy /= fl; fz /= fl
-            var rx = fy, ry = -fx, rz: Float = 0                 // fwd × worldUp(0,0,1)
-            var rl = sqrtf(rx * rx + ry * ry + rz * rz)
-            if rl < 0.0001 { rx = 1; ry = 0; rz = 0; rl = 1 }
-            rx /= rl; ry /= rl; rz /= rl
-            let ux = ry * fz - rz * fy, uy = rz * fx - rx * fz, uz = rx * fy - ry * fx   // right × fwd
-
-            let n = mesh.verts.count
-            var wx = [Float](repeating: 0, count: n), wy = wx, wz = wx
-            var sx = [Float](repeating: 0, count: n), sy = sx, sd = sx
-            var ok = [Bool](repeating: false, count: n)
-            for vi in 0..<n {
-                let (mx, my, mz) = mesh.verts[vi]
-                let px = e.x + scale * (mx * rx + my * fx + mz * ux)
-                let py = e.y + scale * (mx * ry + my * fy + mz * uy)
-                let pz = e.z + scale * (mx * rz + my * fz + mz * uz)
-                wx[vi] = px; wy[vi] = py; wz[vi] = pz
-                if let p = project(px, py, pz, camera: camera) { sx[vi] = p.x; sy[vi] = p.y; sd[vi] = p.depth; ok[vi] = true }
-            }
-
-            // Mesh centroid (world space) — used to orient each face normal
-            // outward. The hulls are convex, so a normal that points away from
-            // the centroid faces outward regardless of how the face was wound.
-            // This makes backface culling winding-independent: the fighter /
-            // destroyer wedge has mixed winding, which previously left some
-            // front faces culled (holes in the hull).
-            var mcx: Float = 0, mcy: Float = 0, mcz: Float = 0
-            for vi in 0..<n { mcx += wx[vi]; mcy += wy[vi]; mcz += wz[vi] }
-            mcx /= Float(n); mcy /= Float(n); mcz /= Float(n)
-
-            // Draw the craft whole or not at all: if any vertex is behind or
-            // hard up against the camera near-plane, the projection blows up
-            // (stretched/torn triangles), so skip the entire ship. The 14-unit
-            // floor sits well inside the in-game anti-collision distance, so this
-            // only ever triggers on the attract camera flying through frozen craft.
-            var nearest = Float.greatestFiniteMagnitude
-            var clipped = false
-            for vi in 0..<n {
-                if ok[vi] { nearest = min(nearest, sd[vi]) } else { clipped = true; break }
-            }
-            if clipped || nearest < 14 { continue }
-
-            for (ia, ib, ic) in mesh.faces {
-                if !(ok[ia] && ok[ib] && ok[ic]) { continue }    // any vertex behind camera → skip
-                let e1x = wx[ib] - wx[ia], e1y = wy[ib] - wy[ia], e1z = wz[ib] - wz[ia]
-                let e2x = wx[ic] - wx[ia], e2y = wy[ic] - wy[ia], e2z = wz[ic] - wz[ia]
-                var nx = e1y * e2z - e1z * e2y, ny = e1z * e2x - e1x * e2z, nz = e1x * e2y - e1y * e2x
-                let nl = sqrtf(nx * nx + ny * ny + nz * nz); if nl < 1e-5 { continue }
-                nx /= nl; ny /= nl; nz /= nl
-                let cxw = (wx[ia] + wx[ib] + wx[ic]) / 3, cyw = (wy[ia] + wy[ib] + wy[ic]) / 3, czw = (wz[ia] + wz[ib] + wz[ic]) / 3
-                // Orient outward (away from the mesh centroid), then cull/shade.
-                if nx * (cxw - mcx) + ny * (cyw - mcy) + nz * (czw - mcz) < 0 { nx = -nx; ny = -ny; nz = -nz }
-                if nx * (camX - cxw) + ny * (camY - cyw) + nz * (camZ - czw) <= 0 { continue }   // backface
-                var b = nx * lx + ny * ly + nz * lz
-                b = 0.35 + 0.65 * max(0, b)
-                let col = packRGBA(UInt8(min(255, mesh.color.0 * b)),
-                                   UInt8(min(255, mesh.color.1 * b)),
-                                   UInt8(min(255, mesh.color.2 * b)))
-                fillTri(sx[ia], sy[ia], sd[ia], sx[ib], sy[ib], sd[ib], sx[ic], sy[ic], sd[ic], col)
-            }
-        }
-    }
-
-    @inline(__always) private func sq(_ x: Float) -> Float { x * x }
-
-    /// Depth-tested flat triangle fill (barycentric).
-    private func fillTri(_ ax: Float, _ ay: Float, _ ad: Float,
-                         _ bx: Float, _ by: Float, _ bd: Float,
-                         _ cx: Float, _ cy: Float, _ cd: Float, _ color: UInt32) {
-        let minX = max(0, Int((min(ax, min(bx, cx))).rounded(.down)))
-        let maxX = min(width - 1, Int((max(ax, max(bx, cx))).rounded(.up)))
-        let minY = max(0, Int((min(ay, min(by, cy))).rounded(.down)))
-        let maxY = min(height - 1, Int((max(ay, max(by, cy))).rounded(.up)))
-        if minX > maxX || minY > maxY { return }
-        let area = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax)
-        if abs(area) < 1e-4 { return }
-        let inv = 1 / area
-        let fb = framebuffer, db = depthBuf
-        for py in minY...maxY {
-            let fy = Float(py) + 0.5
-            let row = py * width
-            for px in minX...maxX {
-                let fx = Float(px) + 0.5
-                let wa = ((bx - fx) * (cy - fy) - (by - fy) * (cx - fx)) * inv
-                let wb = ((cx - fx) * (ay - fy) - (cy - fy) * (ax - fx)) * inv
-                let wc = 1 - wa - wb
-                if wa < 0 || wb < 0 || wc < 0 { continue }
-                let depth = wa * ad + wb * bd + wc * cd
-                let idx = row + px
-                if depth < db[idx] { fb[idx] = color; db[idx] = depth }
-            }
-        }
     }
 
     /// Flat triangle fill with NO depth test — for UI/codex models that paint
@@ -333,145 +102,6 @@ final class VoxelRenderer {
         }
     }
 
-    /// Shortest signed distance on a periodic (tiling) axis of length `size`.
-    @inline(__always) private func wrapDelta(_ d: Float, _ size: Float) -> Float {
-        var r = d.truncatingRemainder(dividingBy: size)
-        let half = size * 0.5
-        if r > half { r -= size } else if r < -half { r += size }
-        return r
-    }
-
-    // MARK: Projection (shared by targeting + effects)
-
-    /// World point → (depth, screen x, screen y), or nil if behind/too far.
-    /// Uses the same basis and vertical projection as the terrain + sprites,
-    /// so targeting and effects line up exactly with what's drawn.
-    func project(_ wx: Float, _ wy: Float, _ wz: Float, camera: Camera) -> (depth: Float, x: Float, y: Float)? {
-        let a = camera.angle
-        let fwdX = -sinf(a), fwdY = -cosf(a)
-        let rightX = cosf(a), rightY = -sinf(a)
-        let mapSize = Float(terrain.size)
-        let dx = wrapDelta(wx - camera.x, mapSize)
-        let dy = wrapDelta(wy - camera.y, mapSize)
-        let depth = dx * fwdX + dy * fwdY
-        if depth <= 1 || depth >= camera.maxDistance { return nil }
-        let lateral = dx * rightX + dy * rightY
-        let halfW = Float(width) * 0.5
-        let sx = halfW + (lateral / depth) * halfW
-        let sy = (camera.height - wz) / depth * camera.scaleHeight + camera.horizon
-        return (depth, sx, sy)
-    }
-
-    // MARK: Targeting
-
-    /// Index of the nearest, non-occluded craft whose billboard the reticle
-    /// is over. Call BEFORE drawEnemies so the depth buffer holds terrain only
-    /// (otherwise a craft occludes itself). nil = nothing under the reticle.
-    func targetedEnemy(in field: EnemyField, camera: Camera,
-                       crosshairX: Float, crosshairY: Float) -> Int? {
-        let w = width, h = height
-        let scaleH = camera.scaleHeight
-        var best: Int? = nil
-        var bestDepth = Float.greatestFiniteMagnitude
-
-        for (i, e) in field.enemies.enumerated() {
-            guard let p = project(e.x, e.y, e.z, camera: camera) else { continue }
-            // Reticle within the craft's projected radius (+ forgiving margin)?
-            let r = min(field.scale(for: e.kind) * scaleH / p.depth, Float(h) * 4) + 4
-            if abs(crosshairX - p.x) > r { continue }
-            if abs(crosshairY - p.y) > r { continue }
-            // Occlusion: is the craft's centre pixel in front of the terrain?
-            var px = Int(p.x), py = Int(p.y)
-            if px < 0 { px = 0 } else if px >= w { px = w - 1 }
-            if py < 0 { py = 0 } else if py >= h { py = h - 1 }
-            if p.depth >= depthBuf[py * w + px] { continue }
-            if p.depth < bestDepth { bestDepth = p.depth; best = i }
-        }
-        return best
-    }
-
-    /// Targeting Computer: the nearest-to-reticle, non-occluded craft whose
-    /// projected centre lies within `zoneRadius` px of the crosshair. Unlike
-    /// `targetedEnemy` (which uses each craft's billboard radius and ranks by
-    /// depth), this uses a fixed screen zone and ranks by 2D screen distance.
-    /// Call BEFORE drawEnemies (depth buffer must hold terrain only).
-    func lockableEnemy(in field: EnemyField, camera: Camera,
-                       crosshairX: Float, crosshairY: Float, zoneRadius: Float) -> Int? {
-        let w = width, h = height
-        var best: Int? = nil
-        var bestD2 = zoneRadius * zoneRadius
-        for (i, e) in field.enemies.enumerated() {
-            guard let p = project(e.x, e.y, e.z, camera: camera) else { continue }
-            let dx = crosshairX - p.x, dy = crosshairY - p.y
-            let d2 = dx * dx + dy * dy
-            if d2 > bestD2 { continue }
-            var px = Int(p.x), py = Int(p.y)
-            if px < 0 { px = 0 } else if px >= w { px = w - 1 }
-            if py < 0 { py = 0 } else if py >= h { py = h - 1 }
-            if p.depth >= depthBuf[py * w + px] { continue }     // occluded by terrain
-            bestD2 = d2; best = i
-        }
-        return best
-    }
-
-    /// Screen-space distance from the reticle to a craft's projected centre,
-    /// or nil if it isn't in view. Used to test whether a lock is still in-zone.
-    func screenDistanceToReticle(ofEnemyAt index: Int, in field: EnemyField, camera: Camera,
-                                 crosshairX: Float, crosshairY: Float) -> Float? {
-        guard let p = screenPosition(ofEnemyAt: index, in: field, camera: camera) else { return nil }
-        let dx = crosshairX - p.x, dy = crosshairY - p.y
-        return sqrtf(dx * dx + dy * dy)
-    }
-
-    /// Where a given craft projects on screen (for tests / future HUD/radar).
-    func screenPosition(ofEnemyAt index: Int, in field: EnemyField, camera: Camera)
-        -> (x: Float, y: Float, depth: Float)? {
-        guard field.enemies.indices.contains(index) else { return nil }
-        let e = field.enemies[index]
-        guard let p = project(e.x, e.y, e.z, camera: camera) else { return nil }
-        return (p.x, p.y, p.depth)
-    }
-
-    // MARK: Effects (call AFTER drawEnemies)
-
-    func drawExplosions(_ explosions: [Explosion], duration: Float, camera: Camera) {
-        let w = width, h = height
-        let fb = framebuffer, db = depthBuf
-        let worldSize: Float = 26
-        for ex in explosions {
-            guard let p = project(ex.x, ex.y, ex.z, camera: camera) else { continue }
-            let lifeT = max(0, min(1, ex.age / duration))
-            let radius = worldSize * (0.4 + lifeT * 1.7) * camera.scaleHeight / p.depth
-            if radius < 0.5 { continue }
-            let r2 = radius * radius
-            let ri = Int(radius)
-            let cxI = Int(p.x), cyI = Int(p.y)
-            let x0 = max(0, cxI - ri), x1 = min(w - 1, cxI + ri)
-            let y0 = max(0, cyI - ri), y1 = min(h - 1, cyI + ri)
-            if x0 > x1 || y0 > y1 { continue }
-            for py in y0...y1 {
-                let dyf = Float(py) - p.y
-                let row = py * w
-                for px in x0...x1 {
-                    let dxf = Float(px) - p.x
-                    let d2 = dxf * dxf + dyf * dyf
-                    if d2 > r2 { continue }
-                    if p.depth >= db[row + px] { continue }       // behind terrain
-                    // Dither-fade the burst as it ages out.
-                    if lifeT > 0.55 {
-                        let hsh = (px &* 73 &+ py &* 131) & 7
-                        if Float(hsh) / 8 < (lifeT - 0.55) / 0.45 { continue }
-                    }
-                    let dn = sqrtf(d2) / radius                   // 0 centre … 1 edge
-                    let col: UInt32
-                    if dn < 0.4 { col = packRGBA(255, 240, 180) }
-                    else if dn < 0.75 { col = packRGBA(255, 150, 50) }
-                    else { col = packRGBA(190, 60, 20) }
-                    fb[row + px] = col
-                }
-            }
-        }
-    }
 
     /// Twin cannon bolts from the lower corners to the reticle.
     func drawTracers(crosshairX: Float, crosshairY: Float) {
@@ -492,18 +122,8 @@ final class VoxelRenderer {
         plot(cx, cy, col)
     }
 
-    /// Targeting Computer: dashed box around the locked craft, sized to its
-    /// projected radius (same math as `targetedEnemy`).
-    func drawLockBox(forEnemyAt index: Int, in field: EnemyField, camera: Camera, color: UInt32) {
-        guard field.enemies.indices.contains(index) else { return }
-        let e = field.enemies[index]
-        guard let p = project(e.x, e.y, e.z, camera: camera) else { return }
-        let r = min(field.scale(for: e.kind) * camera.scaleHeight / p.depth, Float(height) * 4) + 5
-        drawDottedBox(cx: p.x, cy: p.y, half: r, color: color)
-    }
-
-    /// Lock box from a pre-projected screen position + radius (mesh renderer:
-    /// the caller projects through the quaternion camera).
+    /// Lock box from a pre-projected screen position + radius (the caller
+    /// projects through the quaternion camera).
     func drawLockBox(screenX: Float, screenY: Float, half: Float, color: UInt32) {
         drawDottedBox(cx: screenX, cy: screenY, half: min(half, Float(height) * 4) + 5, color: color)
     }
@@ -832,32 +452,6 @@ final class VoxelRenderer {
         Font.draw(text, into: framebuffer, w: width, h: height, x: x, y: height / 6, scale: scale, color: col)
     }
 
-    func drawHUD(score: Int, basesStanding: Int, basesTotal: Int,
-                 aliens: Int, speed: Int, altitude: Int, planetName: String, level: Int,
-                 shield: Int, maxShield: Int) {
-        let white = packRGBA(225, 232, 240)
-        let amber = packRGBA(255, 200, 90)
-        let red = packRGBA(255, 80, 60)
-        let fb = framebuffer
-
-        // Shield bar, bottom-left (green → amber → red as it drops).
-        let frac = max(0, min(1, Float(shield) / Float(max(1, maxShield))))
-        let bx = 10, by = height - 26, bw = 64, bh = 5
-        fillRect(bx - 1, by - 1, bw + 2, bh + 2, packRGBA(18, 18, 22))
-        let hc = frac > 0.5 ? packRGBA(80, 200, 255) : (frac > 0.25 ? amber : red)
-        fillRect(bx, by, Int(Float(bw) * frac), bh, hc)
-        Font.draw("SHIELD", into: fb, w: width, h: height, x: bx + bw + 4, y: by - 1, color: white)
-        Font.draw(String(format: "SCORE %06d", score), into: fb, w: width, h: height, x: 10, y: 9, color: white)
-        Font.draw("BASES \(basesStanding)/\(basesTotal)", into: fb, w: width, h: height, x: 10, y: 19,
-                  color: basesStanding == 0 ? red : amber)
-        Font.draw("ALIENS \(aliens)", into: fb, w: width, h: height, x: 10, y: 29, color: white)
-        // Planet name + level, top-right.
-        let planetText = "\(planetName.uppercased())  L\(level)"
-        Font.draw(planetText, into: fb, w: width, h: height,
-                  x: width - Font.width(planetText) - 12, y: 9, color: amber)
-        Font.draw("SPD \(speed)  ALT \(altitude)", into: fb, w: width, h: height, x: 10, y: height - 12, color: white)
-    }
-
     func drawRadar(camera: Camera, enemies: EnemyField?, structures: StructureField?) {
         let a = camera.angle
         drawRadar(originX: camera.x, originY: camera.y,
@@ -865,11 +459,11 @@ final class VoxelRenderer {
                   enemies: enemies, structures: structures)
     }
 
-    /// Radar scope from an explicit ground basis, so the mesh renderer can pass
-    /// the quaternion camera's *actual* forward/right (its basis handedness differs
-    /// from the voxel yaw convention, so re-deriving from a heading would mirror
-    /// left/right). `fwd`/`right` need not be unit length (only direction matters).
-    /// nil `enemies`/`structures` draw an empty scope (warp transit — contact lost).
+    /// Radar scope from an explicit ground basis — the caller passes the
+    /// quaternion camera's actual forward/right (deriving from a heading alone
+    /// would mirror left/right). `fwd`/`right` need not be unit length (only
+    /// direction matters). nil `enemies`/`structures` draw an empty scope (warp
+    /// transit — contact lost).
     func drawRadar(originX: Float, originY: Float,
                    fwdX: Float, fwdY: Float, rightX rx: Float, rightY ry: Float,
                    enemies: EnemyField?, structures: StructureField?) {
@@ -896,7 +490,7 @@ final class VoxelRenderer {
         }
 
         // Player basis (passed in): forward points up on the scope, right to the right.
-        let mapSize = Float(terrain.size)
+        let mapSize = self.mapSize           // world wrap size (set on terrain change)
         let inner = Float(R - 1)
         func wrap(_ d: Float) -> Float {
             var r = d.truncatingRemainder(dividingBy: mapSize)
@@ -924,69 +518,6 @@ final class VoxelRenderer {
         plot(cxp, cyp - 2, p)
         plot(cxp - 1, cyp - 1, p); plot(cxp + 1, cyp - 1, p)
         plot(cxp - 2, cyp, p); plot(cxp, cyp, p); plot(cxp + 2, cyp, p)
-    }
-
-    /// Draw bolts as small glowing billboards, depth-tested against terrain.
-    func drawProjectiles(_ field: ProjectileField, camera: Camera,
-                         glow: UInt32 = packRGBA(255, 210, 80),
-                         core: UInt32 = packRGBA(255, 255, 220)) {
-        let db = depthBuf
-        for p in field.shots {
-            guard let pr = project(p.x, p.y, p.z, camera: camera) else { continue }
-            let ix = Int(pr.x), iy = Int(pr.y)
-            if ix < 0 || ix >= width || iy < 0 || iy >= height { continue }
-            if pr.depth >= db[iy * width + ix] { continue }     // behind terrain
-            for oy in -1...1 { for ox in -1...1 { plot(ix + ox, iy + oy, glow) } }
-            plot(ix, iy, core)
-        }
-    }
-
-    /// Draw smoke (grey, alpha-blended) and fire/embers (additive glow) as
-    /// depth-tested soft billboards. Used for damaged-structure plumes and
-    /// the debris bursts from destroyed craft.
-    func drawSmoke(_ field: SmokeField, camera: Camera) {
-        let fb = framebuffer, db = depthBuf
-        let scaleH = camera.scaleHeight
-        for p in field.particles {
-            guard let pr = project(p.x, p.y, p.z, camera: camera) else { continue }
-            let t = min(1, p.age / p.life)
-            let worldR: Float = p.fire ? (3 + p.age * 8) : (5 + p.age * 18)
-            var screenR = worldR * scaleH / pr.depth
-            if screenR < 0.6 { continue }
-            screenR = min(screenR, 42)
-            let ri = Int(screenR)
-            let cxI = Int(pr.x), cyI = Int(pr.y)
-            let aBase: Float = p.fire ? (1 - t) * 0.95 : (1 - t) * 0.5
-            if aBase <= 0.02 { continue }
-            for dy in -ri...ri {
-                let py = cyI + dy
-                if py < 0 || py >= height { continue }
-                let row = py * width
-                for dx in -ri...ri {
-                    let px = cxI + dx
-                    if px < 0 || px >= width { continue }
-                    let d2 = dx * dx + dy * dy
-                    if d2 > ri * ri { continue }
-                    let idx = row + px
-                    if pr.depth >= db[idx] { continue }         // behind terrain
-                    let a = aBase * (1 - sqrtf(Float(d2)) / Float(ri))
-                    if a <= 0.02 { continue }
-                    let dst = fb[idx]
-                    let dr = Float(dst & 0xFF), dg = Float((dst >> 8) & 0xFF), dbb = Float((dst >> 16) & 0xFF)
-                    if p.fire {
-                        let fr = 255 * (1 - 0.35 * t), fg = 150 * (1 - 0.6 * t) + 50, fbl: Float = 40
-                        fb[idx] = packRGBA(UInt8(min(255, dr + fr * a)),
-                                           UInt8(min(255, dg + fg * a)),
-                                           UInt8(min(255, dbb + fbl * a)))
-                    } else {
-                        let g = 70 + 80 * t
-                        fb[idx] = packRGBA(UInt8(g * a + dr * (1 - a)),
-                                           UInt8(g * a + dg * (1 - a)),
-                                           UInt8((g + 8) * a + dbb * (1 - a)))
-                    }
-                }
-            }
-        }
     }
 
     /// Red damage vignette/tint when the player is hit (intensity 0…1).
@@ -1377,9 +908,9 @@ final class VoxelRenderer {
         // Scrolling body between the two divider lines.
         let bodyTop = pY + 19, bodyBot = pY + pH - 18, bodyH = bodyBot - bodyTop
         let lineH = 11
-        let total = VoxelRenderer.briefingLines.count * lineH + bodyH
+        let total = Canvas2D.briefingLines.count * lineH + bodyH
         let scroll = Int(time * 14) % total
-        for (i, raw) in VoxelRenderer.briefingLines.enumerated() {
+        for (i, raw) in Canvas2D.briefingLines.enumerated() {
             if raw.isEmpty { continue }
             let y = bodyTop + bodyH - scroll + i * lineH
             if y < bodyTop || y > bodyBot - 7 { continue }          // strict clip; fades hide the edges
@@ -1489,71 +1020,66 @@ enum SmokeTest {
         let genMs = (CACurrentMediaTime() - t0) * 1000
         print(String(format: "  terrain generated in %.1f ms", genMs))
 
-        let renderer = VoxelRenderer(width: w, height: h, terrain: terrain)
-        var camera = Camera.start(over: terrain, renderHeight: h)
-        let input = InputState()
-        input.kb.faster = true         // accelerate while we fly the test
-
-        let frames = 240
+        // Flight model (renderer-independent): fly the 6DOF camera in the
+        // restricted envelope and confirm it advances along its facing and
+        // never sinks into the terrain (the floor clamp in updateMeshFlight).
+        let clearance: Float = 22
+        var cam = Camera6DOF.start(position: SIMD3<Float>(512, 512, terrain.heightF(512, 512) + 90))
+        cam.speed = 120
         let dt: Float = 1.0 / 60.0
-        var total = 0.0
-        var worst = 0.0
-        var checksum: UInt64 = 0
+        let startXY = SIMD2<Float>(cam.position.x, cam.position.y)
+        var minClearance = Float.greatestFiniteMagnitude
+        for f in 0..<240 {
+            let turn: Float = f < 120 ? 1 : 0          // bank into a turn, then straighten
+            cam.flyRestricted(turn: turn, pitchIn: 0, dt: dt)
+            cam.position += cam.forward * cam.speed * dt
+            let ground = terrain.heightF(cam.position.x, cam.position.y)
+            cam.position.z = max(cam.position.z, ground + clearance)
+            minClearance = min(minClearance, cam.position.z - ground)
+        }
+        let travelled = sqrtf((cam.position.x - startXY.x) * (cam.position.x - startXY.x) +
+                              (cam.position.y - startXY.y) * (cam.position.y - startXY.y))
+        print(String(format: "  flight: 6DOF camera travelled %.0f units over 4s; min clearance %.0f", travelled, minClearance))
+        precondition(travelled > 50, "the flight camera barely moved")
+        precondition(minClearance >= clearance - 0.5, "the flight camera sank into the terrain")
 
-        for f in 0..<frames {
-            camera.update(dt: dt, input: input, terrain: terrain)
-            let s = CACurrentMediaTime()
-            renderer.render(camera: camera)
-            let ms = (CACurrentMediaTime() - s) * 1000
-            total += ms
-            worst = max(worst, ms)
-            if f == frames - 1 {
-                for i in stride(from: 0, to: w * h, by: 257) {
-                    checksum &+= UInt64(renderer.framebuffer[i])
-                }
-            }
+        // GPU world render — best-effort. On a real Mac this exercises the mesh
+        // renderer end-to-end (encode → readback) and asserts terrain drew; over
+        // SSH / headless CI with no Metal device it is SKIPPED, not failed.
+        if let device = MTLCreateSystemDefaultDevice(),
+           let mr = MeshTerrainRenderer(device: device, terrain: terrain, width: w, height: h) {
+            mr.recenterIfNeeded(around: cam.position, sync: true)
+            let rgb = mr.renderToRGB(camera: cam)
+            var checksum: UInt64 = 0
+            for i in stride(from: 0, to: rgb.count, by: 257) { checksum &+= UInt64(rgb[i]) }
+            print("  gpu render: \(w)×\(h) frame, checksum \(checksum) (non-zero ⇒ terrain drew)")
+            precondition(!rgb.isEmpty && checksum != 0, "mesh renderer produced a blank frame")
+        } else {
+            print("  gpu render: no Metal device — skipped (headless/CI)")
         }
 
-        let avg = total / Double(frames)
-        print(String(format: "  %d frames @ %d×%d — avg %.2f ms (%.0f fps), worst %.2f ms",
-                     frames, w, h, avg, 1000.0 / avg, worst))
-        print("  final-frame checksum: \(checksum) (non-zero ⇒ terrain drew)")
-        precondition(checksum != 0, "framebuffer was blank — render produced nothing")
-
-        // Regression: render from an absurdly low altitude so terrain
-        // projects above the screen top (negative `top`). This is the case
-        // that trapped on an inverted fill Range; must now complete cleanly.
-        var lowCam = Camera.start(over: terrain, renderHeight: h)
-        lowCam.height = 25
-        renderer.render(camera: lowCam)
-        print("  low-altitude render: OK (no inverted-range trap)")
-
-        // Sprite + occlusion path: render from the start pose and composite
-        // the enemy field; confirm alien pixels actually reached the screen.
+        // 2D canvas overlays: must draw into the framebuffer without trapping
+        // (incl. emoji via Core Text), and actually change the framebuffer.
         let field = EnemyField(terrain: terrain, around: 512, cy: 512)
-        let startCam = Camera.start(over: terrain, renderHeight: h)
-        renderer.render(camera: startCam)
-        var beforeSum: UInt64 = 0
-        for i in stride(from: 0, to: w * h, by: 53) { beforeSum &+= UInt64(renderer.framebuffer[i]) }
-        renderer.drawEnemies(field, camera: startCam)
-        var afterSum: UInt64 = 0
-        for i in stride(from: 0, to: w * h, by: 53) { afterSum &+= UInt64(renderer.framebuffer[i]) }
-        print("  enemy field: \(field.enemies.count) craft; framebuffer changed: \(beforeSum != afterSum)")
-        precondition(beforeSum != afterSum, "no craft drew — sprite/occlusion path is broken")
-
-        // HUD + radar overlay: must draw without trapping.
         let hudStructs = StructureField(terrain: terrain, around: 512, cy: 512, count: 0)
-        renderer.drawHUD(score: 123456, basesStanding: 3, basesTotal: 5,
-                         aliens: field.enemies.count, speed: 140, altitude: 220,
-                         planetName: "Tantalus", level: 2,
-                         shield: 70, maxShield: 100)
-        renderer.drawRadar(camera: startCam, enemies: field, structures: hudStructs)
-        renderer.drawBanner(title: "GAME OVER", subtitle: "SCORE 001200    PRESS R TO RESTART")
-        renderer.drawNameEntry(score: 12300, name: "ACE 😀")
-        renderer.drawGameOver(loseReason: "SHIELDS DOWN", score: 12300,
-                              scores: [HighScoreEntry(name: "ACE 😀", score: 12300, level: 3,
-                                                      stardate: "20260531::0140")], highlight: 0)
-        print("  hud/radar/banner/score-screens: drew without trapping (incl. emoji via Core Text)")
+        let canvas = Canvas2D(width: w, height: h, mapSize: Float(terrain.size))
+        var beforeSum: UInt64 = 0
+        for i in stride(from: 0, to: w * h, by: 53) { beforeSum &+= UInt64(canvas.framebuffer[i]) }
+        canvas.drawCockpit(score: 123456, basesStanding: 3, basesTotal: 5,
+                           aliens: field.enemies.count, planetName: "Tantalus", level: 2,
+                           speed: 140, altitude: 220, shield: 70, maxShield: 100,
+                           roll: 0.1, pitch: 8)
+        canvas.drawRadar(originX: 512, originY: 512, fwdX: 0, fwdY: -1, rightX: -1, rightY: 0,
+                         enemies: field, structures: hudStructs)
+        canvas.drawBanner(title: "GAME OVER", subtitle: "SCORE 001200    PRESS R TO RESTART")
+        canvas.drawNameEntry(score: 12300, name: "ACE 😀")
+        canvas.drawGameOver(loseReason: "SHIELDS DOWN", score: 12300,
+                            scores: [HighScoreEntry(name: "ACE 😀", score: 12300, level: 3,
+                                                    stardate: "20260531::0140")], highlight: 0)
+        var afterSum: UInt64 = 0
+        for i in stride(from: 0, to: w * h, by: 53) { afterSum &+= UInt64(canvas.framebuffer[i]) }
+        print("  canvas: cockpit/radar/banner/score-screens drew (incl. emoji via Core Text)")
+        precondition(beforeSum != afterSum, "the 2D canvas drew nothing")
 
         // High-score persistence (temp file, so the real table is untouched).
         let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("strataris_smoke_scores.json")
@@ -1567,22 +1093,10 @@ enum SmokeTest {
                      "high-score persistence/sort failed")
         try? FileManager.default.removeItem(at: tmp)
 
-        // Combat path: re-render terrain-only (so depth isn't polluted by
-        // sprites), then place the reticle on each craft in turn until one
-        // targets, and confirm it can be removed.
-        renderer.render(camera: startCam)
-        var targeted: Int? = nil
-        var aimAt = (x: Float(0), y: Float(0))
-        for i in field.enemies.indices {
-            guard let sp = renderer.screenPosition(ofEnemyAt: i, in: field, camera: startCam) else { continue }
-            if let t = renderer.targetedEnemy(in: field, camera: startCam, crosshairX: sp.x, crosshairY: sp.y) {
-                targeted = t; aimAt = (sp.x, sp.y); break
-            }
-        }
-        print("  combat: reticle (\(Int(aimAt.x)),\(Int(aimAt.y))) targets enemy \(String(describing: targeted))")
-        precondition(targeted != nil, "no craft targetable with the reticle placed on it")
+        // Combat: a 1-hit craft is destroyed and scores (target resolution is
+        // the caller's projection job; here we verify the hit/score plumbing).
         let before = field.remaining
-        let pts = field.hit(at: targeted!)
+        let pts = field.hit(at: 0)
         precondition(field.remaining == before - 1 && pts != nil, "hit didn't destroy a 1-hit craft")
         print("  combat: kill OK (\(before) → \(field.remaining) craft, \(pts ?? 0) pts)")
 

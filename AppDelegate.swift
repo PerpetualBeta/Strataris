@@ -13,7 +13,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var view: GameView!
     private var renderer: Renderer!
     private var gamepad: Gamepad!
-    private var spikeController: Spike6DOFController!   // experimental 6DOF fly mode
 
     // Sparkle auto-updater. Shares the Jorvik EdDSA signing key; feed + public
     // key live in Info.plist. Starts on launch (scheduled background checks)
@@ -51,26 +50,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             window.setFrame(frame, display: true)
         } else {
             window.center()
-        }
-
-        // Experimental 6DOF free-fly spike (exp/6dof): swap in the mesh-terrain
-        // renderer + quaternion camera instead of the game. Arrows = pitch/roll,
-        // A/D = yaw, W/S (or +/-) = throttle, Space = level out.
-        if ProcessInfo.processInfo.environment["STRATARIS_6DOF"] != nil {
-            let sv = Spike6DOFView(frame: NSRect(origin: .zero, size: size), device: device)
-            sv.colorPixelFormat = .bgra8Unorm
-            sv.preferredFramesPerSecond = 60
-            guard let controller = Spike6DOFController(device: device, view: sv) else {
-                fatalError("Strataris: 6DOF spike init failed")
-            }
-            spikeController = controller
-            sv.delegate = controller
-            window.title = "Strataris — 6DOF spike"
-            window.contentView = sv
-            window.makeFirstResponder(sv)
-            window.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
-            return
         }
 
         let input = InputState()
@@ -201,7 +180,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             ]))
         }
         line("Galactic Colony Defence", size: 12, color: .labelColor)
-        line("A first-person voxel-terrain shoot-’em-up.\nEvery pixel and sound generated in code — no asset files.",
+        line("A first-person mesh-terrain shoot-’em-up.\nEvery pixel and sound generated in code — no asset files.",
              size: 10, color: .secondaryLabelColor)
         line("A Jorvik Software game.", size: 10, color: .secondaryLabelColor, spacingAfter: 2)
 
