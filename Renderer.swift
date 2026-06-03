@@ -92,6 +92,7 @@ final class Renderer: NSObject, MTKViewDelegate {
     private var restartLatch = false
     private var gameOverDwell: Float = 0    // seconds before the game-over screen accepts input
     private var wonTime: Float = 0          // time on the PLANET CLEARED screen (banner fade)
+    private var wonBonus = 0                // bases-saved bonus awarded on the last clear (for the banner)
     private var pauseLatch = false
     private var warpLatch = false
     private var briefingLatch = false
@@ -1412,7 +1413,12 @@ final class Renderer: NSObject, MTKViewDelegate {
             } else if enemies.remaining == 0 {
                 state = .won; audio.planetCleared(); wonTime = 0
                 warpLatch = true; restartLatch = true   // a held warp/fire mustn't skip the screen
-                comms.say("Attack fleet defeated")
+                // Bases-saved bonus: reward defending the colony (the whole point
+                // of the game), scaled by level. Awarded once, here.
+                let saved = structures.standing, total = structures.structures.count
+                wonBonus = total > 0 ? saved * 500 * level : 0
+                if wonBonus > 0 { combat.awardBonus(wonBonus) }
+                comms.say(saved == total && total > 0 ? "All installations intact" : "Attack fleet defeated")
                 combat.clearTransient()                 // clear last laser/explosion
                 projectiles = ProjectileField()         // and any in-flight ordnance
                 bombs = ProjectileField()
@@ -1533,9 +1539,12 @@ final class Renderer: NSObject, MTKViewDelegate {
                 // cleared world with a clear view.
                 wonTime += dt
                 let fade: Float = wonTime < 10 ? 1 : max(0.1, 1 - (wonTime - 10) * 0.9)  // → 0.1 over 1 s
+                let total = structures.structures.count
+                let sub = total > 0
+                    ? "\(structures.standing)/\(total) BASES SAVED   +\(wonBonus)    \(warpPrompt)"
+                    : "LEVEL \(level) CLEAR    \(warpPrompt)"
                 canvas.drawBanner(title: "\(PlanetTheme.name(forLevel: level).uppercased()) SECURED",
-                                 subtitle: "LEVEL \(level) CLEAR    \(warpPrompt)",
-                                 opacity: fade)
+                                 subtitle: sub, opacity: fade)
             case .playing, .title, .briefing, .codex, .warping:
                 break
             }
