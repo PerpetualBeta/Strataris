@@ -314,6 +314,9 @@ final class MeshTerrainRenderer {
     private(set) var cellStride = 1         // world units per cell — grows with altitude (LOD)
     /// World half-extent of the patch (for fog/far tuning); scales with stride.
     var worldHalf: Float { Float(patchN / 2 * cellStride) }
+    /// The fog far-distance from the last encoded frame — beyond it, craft have
+    /// faded into the haze (used by the attract demo to only engage visible craft).
+    private(set) var fogFarDistance: Float = 2600
     private let ibuf: MTLBuffer
     private let indexCount: Int
     private var vbufs: [MTLBuffer]          // pool, cycled so an in-flight frame isn't overwritten
@@ -730,6 +733,7 @@ final class MeshTerrainRenderer {
             : Float(band) + min(1, max(0, (alt - Float(band) * 250) / 150))
         let strideF = min(Float(cellStride), ramp)
         let fogFar = Float(patchN / 2) * 0.82 * strideF
+        fogFarDistance = fogFar
         let fogP = SIMD4<Float>(fogFar * 0.55, fogFar, 0, 0)
         var u = MeshUniforms(mvp: vp,
                              eye: SIMD4<Float>(camera.position, 1),

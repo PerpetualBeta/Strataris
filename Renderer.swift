@@ -165,6 +165,21 @@ final class Renderer: NSObject, MTKViewDelegate {
     private var titleTerrain: Terrain
     private var titleStructures: StructureField   // ctor stamps bases into titleTerrain (mesh renders them)
 
+    // Title attract-mode demo: a non-interactive skirmish over the title world,
+    // reusing the real enemy AI + combat + effects so the title screen shows the
+    // game in motion (the classic arcade hook). Updated only while the attract
+    // flyover is on screen (title / briefing / codex).
+    private var demoEnemies: EnemyField?
+    private var demoSmoke: SmokeField?
+    private var demoProjectiles = ProjectileField()
+    private var demoBombs = ProjectileField()
+    private var demoCombat = Combat()
+    private var demoInput = InputState()          // synthetic: fire driven by the auto-targeter
+    private var demoLockedIdx: Int?               // resolved index of the locked craft (for render/tracers)
+    private var demoLockId: Int?                  // committed lock: ONE craft's id, held until destroyed
+    private var demoLockBurst: Float = 0          // time we've poured fire into the current lock
+    private var demoWaveTimer: Float = 0          // delay between waves once the field thins
+
     // Edge/delta tracking for one-shot SFX.
     private var prevKills = 0, prevShots = 0, prevBombs = 0, prevStanding = 0
     private var prevTracer = false
@@ -263,6 +278,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         // The attract flyover shows the random title world; the mesh was built
         // with the game terrain (planet 1), swapped back in on ENGAGE.
         if state == .title { mesh.setTerrain(titleTerrain) }
+        setupAttractDemo()      // the title-screen skirmish (shows the game in motion)
 
         // Title-theme sequencer: a background timer, so nothing the main thread
         // does (menu tracking, synchronous menu opening, window drags, sheets)
@@ -923,22 +939,153 @@ final class Renderer: NSObject, MTKViewDelegate {
         loadPlanet(1)           // stage a clean run (also sets state = .playing)…
         state = .title          // …but show the attract screen until ENGAGE
         mesh.setTerrain(titleTerrain)          // attract flyover shows the title world
+        setupAttractDemo()                     // fresh title-screen skirmish
         input.resetControls()
         lastTitleBeat = -1; musicClock = 0      // restart the title theme cleanly
         audio.uiStart()
     }
 
-    /// Advance the attract-screen flyover and render its backdrop through the
-    /// mesh renderer into the shared canvas framebuffer. Shared by the title,
-    /// briefing and codex states (each then draws its own 2D overlay on top).
-    /// The legacy `titleCam` path math is unchanged; it drives a `Camera6DOF`
-    /// exactly as the warp ascent does. The 2D overlays composite afterwards.
+    // MARK: Attract-mode demo
+
+    /// (Re)create the attract skirmish over the title world: a wave of craft, a
+    /// fresh combat/effects set. Called on entering the title.
+    private func setupAttractDemo() {
+        spawnDemoWave()
+        demoSmoke = SmokeField(terrain: titleTerrain)
+        demoProjectiles = ProjectileField()
+        demoBombs = ProjectileField()
+        demoCombat = Combat()
+        demoLockedIdx = nil
+        demoLockId = nil
+        demoLockBurst = 0
+        demoWaveTimer = 0
+    }
+
+    /// Warp in a fresh wave of attackers near the drifting camera (keeps the
+    /// skirmish lively as the flyover wanders the map).
+    private func spawnDemoWave() {
+        demoEnemies = EnemyField(terrain: titleTerrain, around: titleCam.x, cy: titleCam.y,
+                                 count: 14, difficulty: 1.0, seed: UInt32.random(in: 1...UInt32.max))
+    }
+
+    /// World position of a demo craft wrapped into the title camera's nearest map
+    /// image (the title world tiles every `titleTerrain.size`).
+    private func demoWrapped(_ x: Float, _ y: Float, _ z: Float) -> SIMD3<Float> {
+        let size = Float(titleTerrain.size), h = size * 0.5
+        func near(_ v: Float, _ c: Float) -> Float {
+            var d = (v - c).truncatingRemainder(dividingBy: size)
+            if d > h { d -= size } else if d < -h { d += size }
+            return c + d
+        }
+        return SIMD3(near(x, titleCam.x), near(y, titleCam.y), z)
+    }
+
+    private func demoEntities() -> [(kind: EnemyKind, model: simd_float4x4)] {
+        guard let de = demoEnemies else { return [] }
+        return de.enemies.map { e in
+            var m = enemyModel(e, scale: de.scale(for: e.kind))
+            m.columns.3 = SIMD4<Float>(demoWrapped(e.x, e.y, e.z), 1)
+            return (kind: e.kind, model: m)
+        }
+    }
+
+    private func demoFX() -> [Billboard] {
+        var fx = [Billboard]()
+        for ex in demoCombat.explosions {
+            let t = max(0, min(1, ex.age / demoCombat.explosionDuration)), a = 1 - t
+            let size = 16 + t * 34, c = demoWrapped(ex.x, ex.y, ex.z)
+            fx.append(Billboard(center: c, size: size,       color: SIMD4(1.0, 0.82, 0.40, a),        additive: true))
+            fx.append(Billboard(center: c, size: size * 1.7, color: SIMD4(1.0, 0.45, 0.16, a * 0.55), additive: true))
+        }
+        if let ds = demoSmoke {
+            for p in ds.particles {
+                let t = max(0, min(1, p.age / p.life)), c = demoWrapped(p.x, p.y, p.z)
+                if p.fire {
+                    fx.append(Billboard(center: c, size: 6 + t * 6,  color: SIMD4(1.0, 0.6 - t * 0.3, 0.2, (1 - t) * 0.9), additive: true))
+                } else {
+                    fx.append(Billboard(center: c, size: 7 + t * 14, color: SIMD4(0.5, 0.5, 0.55, (1 - t) * 0.5), additive: false))
+                }
+            }
+        }
+        for s in demoProjectiles.shots { fx.append(Billboard(center: demoWrapped(s.x, s.y, s.z), size: 4, color: SIMD4(1, 1, 0.6, 1), additive: true)) }
+        for s in demoBombs.shots       { fx.append(Billboard(center: demoWrapped(s.x, s.y, s.z), size: 5, color: SIMD4(1, 0.5, 0.2, 1), additive: true)) }
+        return fx
+    }
+
+    /// Is craft `i` engageable right now — on screen AND within visible (non-fog)
+    /// range? Returns its view depth (for nearest-pick), or nil if not. We never
+    /// fire at a craft lost in the haze. `maxDist` is the live fog distance.
+    private func demoEngageable(_ i: Int, cam: Camera6DOF, maxDist: Float) -> Float? {
+        guard let de = demoEnemies, de.enemies.indices.contains(i) else { return nil }
+        let e = de.enemies[i]
+        let w = demoWrapped(e.x, e.y, e.z)
+        let dx = w.x - titleCam.x, dy = w.y - titleCam.y, dz = w.z - titleCam.height
+        if dx * dx + dy * dy + dz * dz > maxDist * maxDist { return nil }      // fogged out
+        guard let p = cam.project(w, width: RenderConfig.width, height: RenderConfig.height) else { return nil }
+        if p.x < 0 || p.x >= Float(RenderConfig.width) || p.y < 0 || p.y >= Float(RenderConfig.height) { return nil }
+        return p.depth
+    }
+
+    /// Drive the non-interactive skirmish one frame: enemy AI, auto-fire at the
+    /// reticle target, ordnance + effects, and a fresh wave once it thins out.
+    private func updateAttractDemo(dt: Float, cam: Camera6DOF) {
+        guard let de = demoEnemies, let ds = demoSmoke else { return }
+        de.update(dt: dt, playerX: titleCam.x, playerY: titleCam.y, playerZ: titleCam.height,
+                  structures: titleStructures, projectiles: demoProjectiles, bombs: demoBombs)
+
+        // Committed lock: hold ONE target and pour fire into it until it blows up,
+        // then pick the next — so our bolts stay on a single craft instead of
+        // spraying. Only ever lock a craft that's on screen and inside the fog.
+        let maxDist = mesh.fogFarDistance * 0.9
+        if let id = demoLockId, let i = de.index(forId: id), demoEngageable(i, cam: cam, maxDist: maxDist) != nil {
+            // keep the current lock
+        } else {
+            demoLockId = nil; demoLockBurst = 0
+        }
+        if demoLockId == nil {                              // acquire the nearest engageable craft
+            var best: Int? = nil, bestDepth = Float.greatestFiniteMagnitude
+            for i in de.enemies.indices {
+                if let depth = demoEngageable(i, cam: cam, maxDist: maxDist), depth < bestDepth {
+                    bestDepth = depth; best = i
+                }
+            }
+            if let i = best { demoLockId = de.enemies[i].id; demoLockBurst = 0 }
+        }
+
+        let idx = demoLockId.flatMap { de.index(forId: $0) }
+        demoLockedIdx = idx
+        demoInput.kb.fire = (idx != nil)                    // tracers only while locked on a visible craft
+        // Craft are 1-shot — destroying needs the lock passed to Combat. Pour fire
+        // for a sustained burst, THEN confirm the kill, so it doesn't vanish on sight.
+        var killIdx: Int? = nil
+        if let i = idx { demoLockBurst += dt; if demoLockBurst >= 0.8 { killIdx = i } }
+        demoCombat.update(dt: dt, input: demoInput, field: de, smoke: ds, lockedTargetIndex: killIdx)
+        if let id = demoLockId, de.index(forId: id) == nil { demoLockId = nil; demoLockBurst = 0 }  // killed → next
+        _ = demoProjectiles.update(dt: dt, playerX: titleCam.x, playerY: titleCam.y, playerZ: titleCam.height, terrain: titleTerrain)
+        _ = demoBombs.update(dt: dt, playerX: 1e9, playerY: 1e9, playerZ: 1e9, terrain: titleTerrain)
+        ds.update(dt: dt, structures: titleStructures, maxHealth: titleStructures.maxHealth)
+        if de.remaining <= 6 {              // thinned out → warp in the next wave after a beat
+            demoWaveTimer += dt
+            if demoWaveTimer >= 1.0 { spawnDemoWave(); demoWaveTimer = 0 }
+        } else {
+            demoWaveTimer = 0
+        }
+    }
+
+    /// Advance the attract-screen flyover and render its backdrop — now with the
+    /// live demo skirmish (craft, fire, explosions) — through the mesh renderer
+    /// into the shared canvas framebuffer. Shared by the title, briefing and
+    /// codex states (each then draws its own 2D overlay on top). The legacy
+    /// `titleCam` path math is unchanged; it drives a `Camera6DOF` exactly as the
+    /// warp ascent does. The 2D overlays composite afterwards.
     private func attractFlyover() {
         let step: Float = 1.0 / 60.0
         titleTime += step
+        // A smooth, slow cinematic glide (no target-chasing — that jerked). Slow
+        // enough that craft spawned ahead linger in the forward view to engage.
         titleCam.angle = sinf(titleTime * 0.09) * 0.28
-        titleCam.x += -sinf(titleCam.angle) * 26 * step
-        titleCam.y += -cosf(titleCam.angle) * 26 * step
+        titleCam.x += -sinf(titleCam.angle) * 13 * step
+        titleCam.y += -cosf(titleCam.angle) * 13 * step
         // Ease altitude so it doesn't snap as we cross terrain cells (the jitter).
         let targetH = titleTerrain.heightF(titleCam.x, titleCam.y) + 95
         titleCam.height += (targetH - titleCam.height) * min(1, step * 2.5)
@@ -948,8 +1095,23 @@ final class Renderer: NSObject, MTKViewDelegate {
         let pos = SIMD3<Float>(titleCam.x, titleCam.y, titleCam.height)
         let c6 = Camera6DOF.restricted(position: pos, heading: titleCam.angle,
                                        pitch: 0, bank: 0, speed: titleCam.speed)
+
+        updateAttractDemo(dt: step, cam: c6)
+
         mesh.recenterIfNeeded(around: pos)
-        mesh.renderInto(canvas.framebuffer, camera: c6)
+        mesh.renderInto(canvas.framebuffer, camera: c6, entities: demoEntities(), fx: demoFX())
+
+        // The demo "pilot" firing — laser bolts converging on the targeted craft
+        // (or the reticle point if the lock just cleared).
+        if demoCombat.tracerActive {
+            var tx = RenderConfig.crosshairX, ty = RenderConfig.crosshairY
+            if let idx = demoLockedIdx, let de = demoEnemies, de.enemies.indices.contains(idx),
+               let p = c6.project(demoWrapped(de.enemies[idx].x, de.enemies[idx].y, de.enemies[idx].z),
+                                  width: RenderConfig.width, height: RenderConfig.height) {
+                tx = p.x; ty = p.y
+            }
+            canvas.drawTracers(crosshairX: tx, crosshairY: ty)
+        }
     }
 
     /// ENGAGE from an attract screen → begin play. Swaps the mesh terrain back
