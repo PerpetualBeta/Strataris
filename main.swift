@@ -1,22 +1,16 @@
 // Strataris — entry point.
 //
 // Two launch paths:
-//   • STRATARIS_SMOKE=1 in the environment → run a headless CPU render of the
-//     voxel engine for a fixed number of frames, print timing, and exit.
-//     Lets us validate the hot path (terrain + raycaster) in CI / from a
-//     shell without a window or GPU surface.
+//   • STRATARIS_SMOKE=1 in the environment → run the headless smoke test
+//     (game-logic checks, the 2D canvas, the 6DOF flight model, and a
+//     best-effort GPU mesh render) and exit. Runs from a shell / CI with no
+//     window; the GPU check skips gracefully when there's no Metal device.
 //   • otherwise → bring up the Cocoa app and the Metal-backed game window.
 
 import Cocoa
 
 if ProcessInfo.processInfo.environment["STRATARIS_SMOKE"] != nil {
     SmokeTest.run()
-    exit(0)
-}
-
-// Experimental 6DOF renderer spike — headless orientation capture (exp/6dof).
-if ProcessInfo.processInfo.environment["STRATARIS_6DOF_PNG"] != nil {
-    Spike6DOF.runHeadlessCapture()
     exit(0)
 }
 

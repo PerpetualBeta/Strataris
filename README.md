@@ -1,6 +1,6 @@
 # Strataris — Galactic Colony Defence
 
-A first-person, voxel-terrain shoot-'em-up for macOS. You fly low over alien
+A first-person, mesh-terrain shoot-'em-up for macOS. You fly low over alien
 worlds, defend ground installations from waves of attacking craft, and warp on
 to the next planet when the skies are clear — chasing a high score across an
 endless campaign. *Defender* by way of *Rescue on Fractalus*, with a
@@ -101,35 +101,37 @@ defaults write cc.jorviksoftware.Strataris RadialPulseWeapon -bool true  # 3 cha
 
 ### Headless smoke test
 
-Exercises the hot path (terrain generation + raycaster + a slice of the game
-loop) with no window or GPU, and prints timing:
+Exercises the renderer-independent game logic (AI intent, structures, return
+fire, scoring, persistence), the 2D canvas draws, the 6DOF flight model, and a
+best-effort GPU mesh render (skipped gracefully where there's no Metal device):
 
 ```sh
 STRATARIS_SMOKE=1 ./.build/Strataris.app/Contents/MacOS/Strataris
 ```
 
-On an M3 Max the voxel render runs ~0.9 ms/frame at 480×270 — the framebuffer
-is upscaled, nearest-neighbour and aspect-correct (letterboxed), to fill the
-window.
+On an M3 Max the GPU mesh frame (encode + readback) runs ~1.3 ms at 480×270 —
+the framebuffer is upscaled, nearest-neighbour and aspect-correct (letterboxed),
+to fill the window.
 
 ## Architecture
 
-The renderer is split CPU (engine) / GPU (present): the CPU voxel engine writes
-a low-res packed-RGBA framebuffer, which a runtime-compiled Metal blit shader
-uploads as a texture and draws to the drawable. The engine has **no GPU
-dependency** (hence the headless smoke test), so it can be re-homed to a Metal
-compute shader behind the same seam if it ever needs the headroom.
+The world is a GPU triangle-mesh terrain (`MeshTerrain.swift`) rendered from a
+quaternion camera (`Camera6DOF`) into a 480×270 offscreen texture, then read
+back into a 2D packed-RGBA canvas (`Canvas2D.swift`) where the HUD, cutscenes,
+codex and text composite on top. A runtime-compiled Metal blit shader uploads
+that canvas and upscales it nearest-neighbour to the drawable.
 
 | File | Role |
 |------|------|
 | `main.swift` | Entry point; smoke-test vs GUI launch |
 | `AppDelegate.swift` | Window (maximised), menu bar, About, Sparkle, input wiring |
-| `GameView.swift` | `MTKView` subclass; keyboard capture |
+| `GameView.swift` | `MTKView` subclass; keyboard capture + rebinding |
 | `Renderer.swift` | Game-state machine, frame loop, Metal present + blit shader |
-| `VoxelRenderer.swift` | CPU voxel engine, HUD/dashboard, screens, headless `SmokeTest` |
+| `MeshTerrain.swift` | GPU mesh-terrain renderer + `Camera6DOF` quaternion flight camera |
+| `Canvas2D.swift` | 2D canvas: HUD/dashboard, radar, cutscenes, codex, screens, headless `SmokeTest` |
 | `Terrain.swift` | Procedural heightmap/colourmap generation + sampling |
 | `PlanetTheme.swift` | The named planet cluster (palettes per world) |
-| `Camera.swift` | Ship/observer state + per-frame flight update |
+| `Camera.swift` | Legacy scalar bridge (HUD/radar/AI/audio), written from `Camera6DOF` |
 | `InputState.swift` | Effective input (keyboard OR'd with gamepad) |
 | `Gamepad.swift` | Controller polling + rebindable action map |
 | `Mesh.swift` | Low-poly ship meshes (flat-shaded solids) |

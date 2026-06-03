@@ -1,6 +1,6 @@
 // Strataris — procedural terrain.
 //
-// A "planet" is two square, power-of-two maps the voxel renderer samples:
+// A "planet" is two square, power-of-two maps the mesh renderer samples:
 //   • heights  — UInt8 altitude, clamped up to sea level so water is flat
 //   • colors   — packed RGBA, baked once with height-banding + slope shading
 //

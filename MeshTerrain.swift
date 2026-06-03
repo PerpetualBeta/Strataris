@@ -1,20 +1,18 @@
-// Strataris — 6DOF renderer SPIKE (experimental branch exp/6dof).
+// Strataris — GPU mesh-terrain renderer + quaternion flight camera.
 //
-// Proves the path from the upright Voxel-Space heightmap raycaster to a true
-// 3-axis (loops + barrel rolls) renderer, WITHOUT touching the shipping engine:
+// The game's world renderer. The heightmap (Terrain) is turned into a GPU
+// triangle mesh and rendered through a Metal 3D pipeline (view/projection +
+// depth buffer) from a quaternion free camera (`Camera6DOF`), so arbitrary
+// pitch/roll — including inverted, for the level-3 Axis Unlock — "just works".
+// It draws into a 480×270 offscreen texture (preserving the lo-fi pixel look
+// under the nearest-neighbour blit) and reads that frame back into the 2D
+// `Canvas2D` framebuffer, which then composites the HUD and cutscenes on top.
+// A view-ray sky tilts/inverts the horizon correctly; enemy craft render as
+// lit flat-shaded entities and effects as camera-facing billboards.
 //
-//   • the heightmap (Terrain) is turned into a GPU triangle mesh,
-//   • rendered through a real Metal 3D pipeline (view/projection matrices +
-//     depth buffer) from a quaternion free camera — so arbitrary pitch/roll
-//     (including inverted) "just works",
-//   • into a 480×270 offscreen texture, preserving the lo-fi pixel look when it
-//     is later upscaled with the existing nearest-neighbour blit,
-//   • with a view-ray sky so the horizon tilts and inverts correctly, and one
-//     depth-tested marker object to confirm sprite/depth integration.
-//
-// Entry: `STRATARIS_6DOF_PNG=1` renders a set of camera orientations (level,
-// pitched, rolled, inverted) to /tmp PPMs for inspection — the spike's
-// pass-criteria check. A windowed free-fly mode is layered on next.
+// Contents: math helpers (perspectiveRH, enemyModel) · Camera6DOF (restricted
+// + full envelopes) · GPU uniforms · MeshTerrainRenderer (streaming patch,
+// altitude LOD, staged terrain swap for warps, framebuffer readback).
 
 import Metal
 import simd
@@ -334,7 +332,7 @@ final class MeshTerrainRenderer {
 
     struct VIn  { float3 pos [[attribute(0)]]; float4 col [[attribute(1)]]; };
     // `flat` colour → no Gouraud blend, so the terrain reads chunky and banded
-    // like the voxel renderer's per-cell shading rather than smooth-interpolated.
+    // (per-cell shading) rather than smooth-interpolated.
     struct VOut { float4 position [[position]]; float4 color [[flat]]; float fogT; };
 
     vertex VOut v_mesh(VIn in [[stage_in]], constant MeshU& u [[buffer(1)]]) {
@@ -413,7 +411,7 @@ final class MeshTerrainRenderer {
         float4 fp = u.invViewProj * float4(in.ndc, 1.0, 1.0); fp /= fp.w;
         float3 dir = normalize(fp.xyz - np.xyz);
         float t = dir.z;                                // world up = +z
-        // Hues come from the planet theme (matches the voxel sky gradient).
+        // Hues come from the planet theme.
         float3 c = t >= 0.0 ? mix(u.horizon.rgb, u.zenith.rgb, smoothstep(0.0, 0.55, t))
                             : mix(u.horizon.rgb, u.ground.rgb, smoothstep(0.0, -0.5, t));
         return float4(c, 1.0);
@@ -883,323 +881,3 @@ final class MeshTerrainRenderer {
         return rgb
     }
 }
-
-// MARK: - Headless capture (STRATARIS_6DOF_PNG=1)
-
-enum Spike6DOF {
-    static func runHeadlessCapture() {
-        setvbuf(stdout, nil, _IONBF, 0)
-        guard let device = MTLCreateSystemDefaultDevice() else { print("6DOF: no Metal device"); return }
-        let w = RenderConfig.width, h = RenderConfig.height
-        let terrain = Terrain(seed: Renderer6DOFSeed)
-        guard let r = MeshTerrainRenderer(device: device, terrain: terrain, width: w, height: h) else {
-            print("6DOF: renderer init failed"); return
-        }
-        let groundZ = terrain.heightF(512, 560)
-        let eye = SIMD3<Float>(512, 560, groundZ + 90)
-
-        // (label, pitch, roll) applied to the level forward heading.
-        let shots: [(String, Float, Float)] = [
-            ("level",     0,           0),
-            ("pitchup",  -0.5,         0),       // nose up ~29°
-            ("pitchdown", 0.5,         0),
-            ("roll45",    0,           0.785),
-            ("roll90",    0,           1.5708),
-            ("inverted",  0,           3.1416),  // barrel-rolled belly-up
-        ]
-        for (name, pitch, roll) in shots {
-            var cam = Camera6DOF.start(position: eye)
-            cam.rotateBody(pitch: pitch, yaw: 0, roll: roll)
-            let rgb = r.renderToRGB(camera: cam)
-            writePPM(rgb, w: w, h: h, path: "/tmp/strataris_6dof_\(name).ppm")
-        }
-
-        // Restricted-envelope sanity: level horizon; a coordinated bank when
-        // turning; pitch that clamps at the envelope limit (no looping).
-        var rcLevel = Camera6DOF.start(position: eye)        // starts .restricted
-        rcLevel.flyRestricted(turn: 0, pitchIn: 0, dt: 1.0 / 60)
-        writePPM(r.renderToRGB(camera: rcLevel), w: w, h: h, path: "/tmp/strataris_6dof_restricted_level.ppm")
-
-        var rcBank = Camera6DOF.start(position: eye)
-        for _ in 0..<30 { rcBank.flyRestricted(turn: 1, pitchIn: 0, dt: 1.0 / 30) }   // bank into a turn
-        writePPM(r.renderToRGB(camera: rcBank), w: w, h: h, path: "/tmp/strataris_6dof_restricted_bank.ppm")
-
-        var rcPitch = Camera6DOF.start(position: eye)
-        for _ in 0..<120 { rcPitch.flyRestricted(turn: 0, pitchIn: 1, dt: 1.0 / 30) } // hold nose-up → clamps
-        writePPM(r.renderToRGB(camera: rcPitch), w: w, h: h, path: "/tmp/strataris_6dof_restricted_pitchclamp.ppm")
-
-        // Streaming check: advance horizontally a long way (past the 4096 wrap),
-        // holding altitude above the terrain and looking down for a vista, while
-        // recentering the patch. Every frame should still have terrain that fades
-        // into fog — no hard edge, since the heightmap tiles.
-        var py: Float = 560
-        for step in 0..<6 {
-            py -= 950
-            let gz = terrain.heightF(512, py)
-            var fcam = Camera6DOF.start(position: SIMD3(512, py, gz + 110))
-            fcam.rotateBody(pitch: -0.45, yaw: 0, roll: 0)    // ~26° nose-down
-            r.recenterIfNeeded(around: fcam.position, sync: true)
-            let rgb = r.renderToRGB(camera: fcam)
-            writePPM(rgb, w: w, h: h, path: "/tmp/strataris_6dof_flight\(step).ppm")
-        }
-
-        // Altitude-LOD check: from way up, the stride widens so the patch reaches
-        // much further than at ground level.
-        let hz = terrain.heightF(512, 560) + 850
-        var hcam = Camera6DOF.start(position: SIMD3(512, 560, hz))
-        hcam.rotateBody(pitch: -0.6, yaw: 0, roll: 0)
-        r.recenterIfNeeded(around: hcam.position, sync: true)
-        writePPM(r.renderToRGB(camera: hcam), w: w, h: h, path: "/tmp/strataris_6dof_highalt.ppm")
-
-        // Enemy craft: spawn a field and render the cluster, depth-tested.
-        let field = EnemyField(terrain: terrain, around: 512, cy: 512)
-        let ents = field.enemies.map { (kind: $0.kind, model: enemyModel($0, scale: field.scale(for: $0.kind))) }
-        let egz = terrain.heightF(512, 360)
-        var ecam = Camera6DOF.start(position: SIMD3(512, 360, egz + 70))
-        ecam.rotateBody(pitch: -0.1, yaw: 0, roll: 0)
-        r.recenterIfNeeded(around: ecam.position, sync: true)
-        // Stand-in effects: an explosion (additive core + glow), smoke (alpha), a bolt.
-        func gz(_ x: Float, _ y: Float, _ up: Float) -> SIMD3<Float> { SIMD3(x, y, terrain.heightF(x, y) + up) }
-        let fxStand: [Billboard] = [
-            Billboard(center: gz(512, 250, 60), size: 12, color: SIMD4(1.0, 0.78, 0.35, 1.0), additive: true),
-            Billboard(center: gz(512, 250, 60), size: 20, color: SIMD4(1.0, 0.42, 0.14, 0.6), additive: true),
-            Billboard(center: gz(540, 280, 52), size: 14, color: SIMD4(0.55, 0.55, 0.60, 0.6), additive: false),
-            Billboard(center: gz(486, 290, 38), size: 5,  color: SIMD4(1.0, 1.0, 0.6, 1.0), additive: true),
-        ]
-        writePPM(r.renderToRGB(camera: ecam, entities: ents, fx: fxStand), w: w, h: h, path: "/tmp/strataris_6dof_enemies.ppm")
-
-        // Structures: bases are stamped into the heightfield, so they must render
-        // as raised, recoloured mesh with no extra geometry — and a destroyed base
-        // must vanish once the patch is rebuilt (the markTerrainDirty path).
-        let sterr = Terrain(seed: Renderer6DOFSeed)
-        let bases = StructureField(terrain: sterr, around: 512, cy: 512, count: 5)
-        if let sr = MeshTerrainRenderer(device: device, terrain: sterr, width: w, height: h),
-           let b0 = bases.structures.first {
-            let bz = sterr.heightF(b0.x, b0.y)
-            let campos = SIMD3<Float>(b0.x + 40, b0.y + 170, bz + 80)
-            let fwd = simd_normalize(SIMD3<Float>(b0.x, b0.y, bz + 10) - campos)
-            let scam = Camera6DOF.start(forward: fwd, position: campos)
-            sr.recenterIfNeeded(around: scam.position, sync: true)
-            writePPM(sr.renderToRGB(camera: scam), w: w, h: h, path: "/tmp/strataris_6dof_structures.ppm")
-            bases.destroy(0)                          // flatten it back to pristine ground
-            sr.markTerrainDirty()
-            sr.recenterIfNeeded(around: scam.position, sync: true)
-            writePPM(sr.renderToRGB(camera: scam), w: w, h: h, path: "/tmp/strataris_6dof_structures_destroyed.ppm")
-            print("6DOF: wrote structures + structures_destroyed PPMs (base 0 at \(Int(b0.x)),\(Int(b0.y)))")
-        }
-
-        // Rough timing (GPU fill is trivial at 480×270; this is a sanity floor).
-        let t0 = CACurrentMediaTime()
-        let frames = 120
-        for i in 0..<frames {
-            var cam = Camera6DOF.start(position: eye)
-            cam.rotateBody(pitch: 0, yaw: Float(i) * 0.05, roll: 0)
-            _ = r.renderToRGB(camera: cam)        // includes a CPU readback + wait each frame
-        }
-        let ms = (CACurrentMediaTime() - t0) * 1000 / Double(frames)
-        print(String(format: "6DOF: wrote 6 orientation + 6 flight PPMs to /tmp; ~%.2f ms/frame incl. readback+wait", ms))
-    }
-
-    private static func writePPM(_ rgb: [UInt8], w: Int, h: Int, path: String) {
-        var data = "P6\n\(w) \(h)\n255\n".data(using: .ascii)!
-        data.append(contentsOf: rgb)
-        try? data.write(to: URL(fileURLWithPath: path))
-    }
-}
-
-/// Fixed seed for the spike scene (kept separate from the game's planet seeds).
-let Renderer6DOFSeed: UInt32 = 7
-
-// MARK: - Windowed free-fly mode (STRATARIS_6DOF=1)
-
-#if canImport(AppKit)
-import AppKit
-import MetalKit
-import Carbon.HIToolbox
-
-/// Held-key state for the free-fly spike, integrated into the camera each frame.
-private final class SpikeInput {
-    var pitchUp = false, pitchDown = false
-    var rollLeft = false, rollRight = false
-    var yawLeft = false, yawRight = false
-    var faster = false, slower = false
-    var resetLevel = false
-    var toggleMode = false
-
-    func set(keyCode: Int, down: Bool) -> Bool {
-        switch keyCode {
-        case kVK_UpArrow:    pitchDown = down          // nose down (stick forward)
-        case kVK_DownArrow:  pitchUp = down            // nose up   (stick back)
-        case kVK_LeftArrow:  rollLeft = down
-        case kVK_RightArrow: rollRight = down
-        case kVK_ANSI_A:     yawLeft = down
-        case kVK_ANSI_D:     yawRight = down
-        case kVK_ANSI_W, kVK_ANSI_Equal: faster = down
-        case kVK_ANSI_S, kVK_ANSI_Minus: slower = down
-        case kVK_Space:      resetLevel = down
-        case kVK_ANSI_T:     toggleMode = down         // restricted ↔ full (stand-in for L3 unlock)
-        default: return false
-        }
-        return true
-    }
-}
-
-/// MTKView that captures keys for the free-fly spike.
-final class Spike6DOFView: MTKView {
-    fileprivate let keys = SpikeInput()
-    override var acceptsFirstResponder: Bool { true }
-    override func keyDown(with e: NSEvent) { if !keys.set(keyCode: Int(e.keyCode), down: true)  { super.keyDown(with: e) } }
-    override func keyUp(with e: NSEvent)   { if !keys.set(keyCode: Int(e.keyCode), down: false) { super.keyUp(with: e) } }
-}
-
-private let spikeBlitShader = """
-#include <metal_stdlib>
-using namespace metal;
-struct VSOut { float4 position [[position]]; float2 uv; };
-vertex VSOut v_blit(uint vid [[vertex_id]]) {
-    float2 p = float2((vid << 1) & 2, vid & 2);
-    VSOut o; o.position = float4(p * 2.0 - 1.0, 0.0, 1.0); o.uv = float2(p.x, 1.0 - p.y);
-    return o;
-}
-fragment float4 f_blit(VSOut in [[stage_in]], texture2d<float> tex [[texture(0)]]) {
-    constexpr sampler s(filter::nearest, address::clamp_to_edge);
-    return tex.sample(s, in.uv);
-}
-"""
-
-/// Drives the free-fly spike: integrates the quaternion camera from held keys
-/// each frame, renders the mesh terrain to the offscreen texture, then upscales
-/// it to the drawable with the same nearest-neighbour blit the game uses.
-final class Spike6DOFController: NSObject, MTKViewDelegate {
-    private let renderer: MeshTerrainRenderer
-    private let terrain: Terrain
-    private let enemies: EnemyField
-    private var camera: Camera6DOF
-    private weak var view: Spike6DOFView?
-    private let blitQueue: MTLCommandQueue
-    private var blitPipeline: MTLRenderPipelineState?
-    private var lastTime: CFTimeInterval = 0
-    private var speed: Float = 120
-    private var modeLatch = false
-    private var animTime: Float = 0
-
-    init?(device: MTLDevice, view: Spike6DOFView) {
-        self.terrain = Terrain(seed: Renderer6DOFSeed)
-        guard let r = MeshTerrainRenderer(device: device, terrain: terrain,
-                                          width: RenderConfig.width, height: RenderConfig.height),
-              let q = device.makeCommandQueue() else { return nil }
-        self.renderer = r
-        self.blitQueue = q
-        self.view = view
-        self.enemies = EnemyField(terrain: terrain, around: 512, cy: 512)
-        let g = terrain.heightF(512, 600)
-        self.camera = Camera6DOF.start(position: SIMD3(512, 600, g + 90))
-        super.init()
-        if let lib = try? device.makeLibrary(source: spikeBlitShader, options: nil) {
-            let d = MTLRenderPipelineDescriptor()
-            d.vertexFunction = lib.makeFunction(name: "v_blit")
-            d.fragmentFunction = lib.makeFunction(name: "f_blit")
-            d.colorAttachments[0].pixelFormat = view.colorPixelFormat
-            blitPipeline = try? device.makeRenderPipelineState(descriptor: d)
-        }
-    }
-
-    func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
-
-    /// Looping stand-in explosions + smoke near the enemy cluster, so the
-    /// billboard path is visible while flying (the spike has no Combat/Smoke).
-    private func standInEffects() -> [Billboard] {
-        func gz(_ x: Float, _ y: Float, _ up: Float) -> SIMD3<Float> { SIMD3(x, y, terrain.heightF(x, y) + up) }
-        var fx = [Billboard]()
-        let spots: [(Float, Float, Float)] = [(512, 460, 0), (470, 360, 0.9), (560, 300, 1.7)]
-        for (x, y, off) in spots {
-            let p = (animTime * 0.6 + off).truncatingRemainder(dividingBy: 1.0)   // 0..1 loop
-            let a = 1 - p
-            let size = 8 + p * 24
-            fx.append(Billboard(center: gz(x, y, 55), size: size, color: SIMD4(1.0, 0.70, 0.28, a), additive: true))
-            fx.append(Billboard(center: gz(x, y, 55), size: size * 1.4, color: SIMD4(1.0, 0.38, 0.12, a * 0.55), additive: true))
-            fx.append(Billboard(center: gz(x + 6, y, 55 + p * 35), size: 12 + p * 16,
-                                color: SIMD4(0.50, 0.50, 0.55, a * 0.5), additive: false))   // smoke
-        }
-        return fx
-    }
-
-    func draw(in mtkView: MTKView) {
-        let now = CACurrentMediaTime()
-        if lastTime == 0 { lastTime = now }
-        let dt = Float(min(1.0 / 20.0, max(0.0, now - lastTime)))
-        lastTime = now
-        animTime += dt
-
-        let k = (view?.keys) ?? SpikeInput()
-
-        // T toggles the flight envelope (stands in for reaching the level-3 Axis
-        // Unlock perk); reflect it in the window title.
-        if k.toggleMode && !modeLatch {
-            modeLatch = true
-            camera.setMode(camera.mode == .restricted ? .full : .restricted)
-            view?.window?.title = camera.mode == .restricted
-                ? "Strataris — 6DOF (RESTRICTED envelope)"
-                : "Strataris — 6DOF (FULL — Axis Unlock)"
-        }
-        if !k.toggleMode { modeLatch = false }
-
-        let pitchIn = (k.pitchUp ? 1 : 0) - (k.pitchDown ? 1 : 0)
-        let rollIn  = (k.rollRight ? 1 : 0) - (k.rollLeft ? 1 : 0)   // right-positive
-        if camera.mode == .restricted {
-            // Arrows bank-and-turn (L/R) and pitch (U/D), clamped envelope.
-            camera.flyRestricted(turn: Float(-rollIn), pitchIn: Float(pitchIn), dt: dt)
-        } else {
-            // Full 6DOF: arrows roll/pitch, A/D yaw. Hands-off → ease back to level.
-            let yaw = (k.yawLeft ? 1 : 0) - (k.yawRight ? 1 : 0)
-            if pitchIn == 0 && rollIn == 0 && yaw == 0 {
-                camera.autoLevelFull(dt: dt)
-            } else {
-                camera.flyFull(pitch: Float(pitchIn), yaw: Float(yaw), roll: Float(rollIn), dt: dt)
-            }
-            camera.bankToTurn(dt: dt)        // banking changes heading, like an aircraft
-        }
-        if k.resetLevel {                              // Space → recover to level flight
-            camera.setMode(.restricted)
-            camera.pitch = 0; camera.bank = 0
-            camera.flyRestricted(turn: 0, pitchIn: 0, dt: dt)
-            view?.window?.title = "Strataris — 6DOF (RESTRICTED envelope)"
-        }
-
-        if k.faster { speed = min(420, speed + 160 * dt) }
-        if k.slower { speed = max(0, speed - 160 * dt) }
-        camera.position += camera.forward * speed * dt
-
-        // Ground collision: keep the ship above the terrain (no falling through).
-        let floor = terrain.heightF(camera.position.x, camera.position.y) + 10
-        if camera.position.z < floor { camera.position.z = floor }
-
-        renderer.recenterIfNeeded(around: camera.position)
-
-        let ents = enemies.enemies.map {
-            (kind: $0.kind, model: enemyModel($0, scale: enemies.scale(for: $0.kind)))
-        }
-        guard let cmd = renderer.encode(camera: camera, entities: ents, fx: standInEffects()) else { return }
-        if let drawable = mtkView.currentDrawable,
-           let pass = mtkView.currentRenderPassDescriptor,
-           let pipe = blitPipeline,
-           let enc = cmd.makeRenderCommandEncoder(descriptor: pass) {
-            enc.setRenderPipelineState(pipe)
-            enc.setFragmentTexture(renderer.colorTex, index: 0)
-            // Letterbox the fixed-aspect framebuffer into the drawable.
-            let dw = Double(drawable.texture.width), dh = Double(drawable.texture.height)
-            if dw > 0, dh > 0 {
-                let target = Double(RenderConfig.width) / Double(RenderConfig.height)
-                var vw = dw, vh = dh, vx = 0.0, vy = 0.0
-                if dw / dh > target { vw = dh * target; vx = (dw - vw) / 2 }
-                else { vh = dw / target; vy = (dh - vh) / 2 }
-                enc.setViewport(MTLViewport(originX: vx, originY: vy, width: vw, height: vh, znear: 0, zfar: 1))
-            }
-            enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
-            enc.endEncoding()
-            cmd.present(drawable)
-        }
-        cmd.commit()
-    }
-}
-#endif

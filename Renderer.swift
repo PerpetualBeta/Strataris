@@ -1,6 +1,6 @@
 // Strataris — Metal presentation layer.
 //
-// The voxel engine renders on the CPU into a small RGBA framebuffer; this
+// The canvas engine renders on the CPU into a small RGBA framebuffer; this
 // layer's only job is to get that framebuffer onto the screen each frame:
 // upload it to a texture and draw a single full-screen triangle that samples
 // it with NEAREST filtering, so the low-res image upscales into crisp,
@@ -62,7 +62,7 @@ final class Renderer: NSObject, MTKViewDelegate {
 
     private var terrain: Terrain
     private var structures: StructureField
-    private var voxel: VoxelRenderer
+    private var canvas: Canvas2D
     private var enemies: EnemyField
     private var combat = Combat()
     private var camera: Camera
@@ -70,12 +70,10 @@ final class Renderer: NSObject, MTKViewDelegate {
     private let input: InputState
 
     // GPU mesh-terrain renderer (true 6DOF-capable; the default). The legacy
-    // `Camera` stays authoritative for flight/HUD/AI in this milestone; `camera6`
-    // is the quaternion view derived from it each frame to draw the 3D world.
-    // `useMesh` is fixed at init (flag + successful renderer build); flipping the
-    // FeatureFlag falls the whole game back to the Voxel-Space raycaster.
-    private var mesh: MeshTerrainRenderer?
-    private let useMesh: Bool
+    // `camera6` is the authoritative quaternion flight camera; the legacy
+    // `Camera` is a derived scalar bridge (x/y/height/angle/roll/pitch/speed)
+    // that the HUD, radar, enemy AI and engine audio still read.
+    private let mesh: MeshTerrainRenderer
     private var camera6 = Camera6DOF.start(position: SIMD3<Float>(512, 512, 200))
     /// Smoothed scope heading for the radar: full-6DOF maneuvers can whip (steep
     /// bank) or flip (over the top of a loop) the raw ground heading; the scope
@@ -132,9 +130,8 @@ final class Renderer: NSObject, MTKViewDelegate {
     private var hasTargetingComputer: Bool { level >= 6 }
     private var hasCloak: Bool { level >= 9 }
     private var hasRadialPulse: Bool { level >= 12 }
-    /// Full 6DOF (loops, rolls, yaw). Mesh renderer only — the voxel raycaster
-    /// is physically yaw-only, so the perk never engages on the fallback.
-    private var hasAxisUnlock: Bool { level >= 3 && useMesh }
+    /// Full 6DOF (loops, rolls, yaw) — the level-3 Axis Unlock perk.
+    private var hasAxisUnlock: Bool { level >= 3 }
     private var pulseCharges = 0                // radial pulse: granted at level 12
     private var targetLockId: Int? = nil        // targeting computer: locked craft (stable id)
     private var cloakActive: Float = 0          // seconds of cloak remaining (>0 = cloaked)
@@ -155,10 +152,9 @@ final class Renderer: NSObject, MTKViewDelegate {
     // Warp cut-scene state (async terrain gen + cinematic phases).
     private var warpPhase = 0
     private var warpTime: Float = 0
-    private var warpCam = Camera(x: 0, y: 0, height: 0, angle: 0, horizon: 0, horizonBase: 0)
+    private var warpCam = Camera(x: 0, y: 0, height: 0, angle: 0)
     private var warpReady = false
     private var warpTerrain: Terrain?
-    private var warpVoxel: VoxelRenderer?
     private var warpStructures: StructureField?
     private var warpEnemies: EnemyField?
     private let warpPhaseDur: [Float] = [2.0, 1.8, 2.2, 1.6, 2.2]   // ascent, orbit, hyper, approach, descent
@@ -167,8 +163,7 @@ final class Renderer: NSObject, MTKViewDelegate {
     // attract scene varies each launch WITHOUT changing the deterministic
     // game planets.
     private var titleTerrain: Terrain
-    private var titleVoxel: VoxelRenderer
-    private var titleStructures: StructureField
+    private var titleStructures: StructureField   // ctor stamps bases into titleTerrain (mesh renders them)
 
     // Edge/delta tracking for one-shot SFX.
     private var prevKills = 0, prevShots = 0, prevBombs = 0, prevStanding = 0
@@ -231,8 +226,8 @@ final class Renderer: NSObject, MTKViewDelegate {
         let t = Terrain(seed: seed, theme: PlanetTheme.forPlanet(1))
         self.terrain = t
         self.structures = StructureField(terrain: t, around: 512, cy: 512, count: 5, seed: seed ^ 0x00AB_CDEF)
-        self.voxel = VoxelRenderer(width: w, height: h, terrain: t)
-        self.camera = Camera.start(over: t, renderHeight: h)
+        self.canvas = Canvas2D(width: w, height: h, mapSize: Float(t.size))
+        self.camera = Camera.start(over: t)
         self.enemies = EnemyField(terrain: t, around: 512, cy: 512,
                                   count: Renderer.enemyCount(forPlanet: 1),
                                   difficulty: Renderer.difficulty(forPlanet: 1),
@@ -246,17 +241,14 @@ final class Renderer: NSObject, MTKViewDelegate {
         let tTheme = PlanetTheme.all.randomElement()!
         let tt = Terrain(size: 1024, seed: tSeed, theme: tTheme)
         self.titleTerrain = tt
-        self.titleVoxel = VoxelRenderer(width: w, height: h, terrain: tt)
         self.titleStructures = StructureField(terrain: tt, around: 512, cy: 512, count: 5, seed: tSeed ^ 0xABCD)
-        self.titleCam = Camera.start(over: tt, renderHeight: h)
+        self.titleCam = Camera.start(over: tt)
 
-        // Build the GPU mesh-terrain renderer for planet 1 (the default path).
-        // If the flag is off or the build fails, fall back to the voxel raycaster.
-        let m = FeatureFlags.useMeshRenderer
-            ? MeshTerrainRenderer(device: device, terrain: t, width: w, height: h)
-            : nil
+        // Build the GPU mesh-terrain renderer for planet 1 (the world renderer).
+        guard let m = MeshTerrainRenderer(device: device, terrain: t, width: w, height: h) else {
+            fatalError("Strataris: could not build the mesh terrain renderer")
+        }
         self.mesh = m
-        self.useMesh = (m != nil)
 
         super.init()
         resetCamera6(over: terrain)
@@ -267,6 +259,10 @@ final class Renderer: NSObject, MTKViewDelegate {
             level = n
             loadPlanet(n)
         }
+
+        // The attract flyover shows the random title world; the mesh was built
+        // with the game terrain (planet 1), swapped back in on ENGAGE.
+        if state == .title { mesh.setTerrain(titleTerrain) }
 
         // Title-theme sequencer: a background timer, so nothing the main thread
         // does (menu tracking, synchronous menu opening, window drags, sheets)
@@ -304,13 +300,13 @@ final class Renderer: NSObject, MTKViewDelegate {
         let t = Terrain(seed: seed, theme: PlanetTheme.forPlanet(n))
         terrain = t
         structures = StructureField(terrain: t, around: 512, cy: 512, count: 5, seed: seed ^ 0x00AB_CDEF)
-        voxel = VoxelRenderer(width: RenderConfig.width, height: RenderConfig.height, terrain: t)
+        canvas.mapSize = Float(t.size)     // radar wrap; the canvas itself is reused
         enemies = EnemyField(terrain: t, around: 512, cy: 512,
                              count: Renderer.enemyCount(forPlanet: n),
                              difficulty: Renderer.difficulty(forPlanet: n),
                              seed: seed ^ 0x00DE_F123)
-        camera = Camera.start(over: t, renderHeight: RenderConfig.height)
-        mesh?.setTerrain(t)                 // off the hot path (load / restart): sync is fine
+        camera = Camera.start(over: t)
+        mesh.setTerrain(t)                 // off the hot path (load / restart): sync is fine
         resetCamera6(over: t)
         projectiles = ProjectileField()
         bombs = ProjectileField()
@@ -396,7 +392,7 @@ final class Renderer: NSObject, MTKViewDelegate {
     /// N" becomes usable on planet N. One-time per level (level only increments).
     private func unlockPerks(reaching lvl: Int) {
         switch lvl {
-        case 3:  if useMesh { notify("AXIS UNLOCK — FULL MANEUVERING") }
+        case 3:  notify("AXIS UNLOCK — FULL MANEUVERING")
         case 6:  notify("TARGETING COMPUTER ONLINE")
         case 9:  notify("CLOAKING DEVICE ONLINE"); cloakActive = 0; cloakCooldown = 0
         case 12: pulseCharges = 3; notify("RADIAL PULSE ARMED")
@@ -411,11 +407,9 @@ final class Renderer: NSObject, MTKViewDelegate {
 
     private func notify(_ text: String) { perkBanner = text; perkBannerTimer = 4 }
 
-    // MARK: Mesh-renderer flight (Milestone 1)
+    // MARK: Flight
 
-    /// Min altitude above terrain in mesh mode. The mesh renderer (unlike the
-    /// voxel raycaster's `Camera.clearance = 110`) has no need to keep the eye
-    /// well above the heightmap, so this is small — you can dive and skim the hills.
+    /// Min altitude above terrain — small, so you can dive and skim the hills.
     private let meshClearance: Float = 22
     private let meshThrottle: (min: Float, max: Float, accel: Float) = (20, 280, 140)
 
@@ -498,7 +492,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         camera.height = camera6.position.z
         camera.angle = camera6.groundHeading
         camera.speed = camera6.speed
-        // Attitude dial: drawAttitude exaggerates bank ×3 (tuned for the voxel
+        // Attitude dial: drawAttitude exaggerates bank ×3 (tuned for the canvas
         // build's tiny cosmetic roll), so pre-divide to show the TRUE bank angle —
         // it should read the same tilt as the 3D horizon. Pitch maps the ±0.5 rad
         // envelope onto the dial's ±80 scale (clamped: full-6DOF pitch can exceed
@@ -511,7 +505,7 @@ final class Renderer: NSObject, MTKViewDelegate {
     /// tiles every `terrain.size` units, so pick the image of (x, y) nearest the
     /// camera — otherwise craft/effects across the wrap seam render a full map
     /// away (fogged out, invisible) instead of right next door. Mirrors the
-    /// wrapDelta the voxel `project` / radar / AI all apply.
+    /// wrap the radar and enemy AI apply.
     private func meshWrapped(_ x: Float, _ y: Float, _ z: Float) -> SIMD3<Float> {
         let size = Float(terrain.size), h = size * 0.5
         func near(_ v: Float, _ c: Float) -> Float {
@@ -534,7 +528,7 @@ final class Renderer: NSObject, MTKViewDelegate {
 
     /// Map the live effect state to camera-facing billboards for the 3D pass:
     /// explosions (additive core + glow), smoke (alpha) / embers (additive), and
-    /// enemy bolts / falling bombs (additive). Mirrors the voxel sprite draws.
+    /// enemy bolts / falling bombs (additive).
     private func meshFX() -> [Billboard] {
         var fx = [Billboard]()
         for ex in combat.explosions {
@@ -565,9 +559,9 @@ final class Renderer: NSObject, MTKViewDelegate {
                                width: RenderConfig.width, height: RenderConfig.height)
     }
 
-    /// Mesh-mode equivalent of `voxel.targetedEnemy`: nearest craft (by depth)
-    /// whose projected billboard the centre reticle is over. Terrain occlusion is
-    /// best-effort (skipped) — craft hover clear of the ground.
+    /// Nearest craft (by depth) whose projected billboard the centre reticle is
+    /// over. Terrain occlusion is best-effort (skipped) — craft hover clear of
+    /// the ground.
     private func meshTargetedEnemy() -> Int? {
         let cx = RenderConfig.crosshairX, cy = RenderConfig.crosshairY
         var best: Int? = nil, bestDepth = Float.greatestFiniteMagnitude
@@ -580,8 +574,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         return best
     }
 
-    /// Mesh-mode equivalent of `voxel.lockableEnemy`: nearest-to-reticle craft
-    /// within `zone` px, ranked by 2D screen distance.
+    /// Nearest-to-reticle craft within `zone` px, ranked by 2D screen distance.
     private func meshLockableEnemy(zone: Float) -> Int? {
         let cx = RenderConfig.crosshairX, cy = RenderConfig.crosshairY
         var best: Int? = nil, bestD2 = zone * zone
@@ -601,23 +594,13 @@ final class Renderer: NSObject, MTKViewDelegate {
         let zone: Float = 100
         if let id = targetLockId {
             var inZone = false
-            if let idx = enemies.index(forId: id) {
-                if useMesh {
-                    if let p = meshProject(enemyAt: idx) {
-                        let dx = cx - p.x, dy = cy - p.y; inZone = sqrtf(dx * dx + dy * dy) <= zone
-                    }
-                } else if let d = voxel.screenDistanceToReticle(ofEnemyAt: idx, in: enemies, camera: camera,
-                                                                crosshairX: cx, crosshairY: cy) {
-                    inZone = d <= zone
-                }
+            if let idx = enemies.index(forId: id), let p = meshProject(enemyAt: idx) {
+                let dx = cx - p.x, dy = cy - p.y; inZone = sqrtf(dx * dx + dy * dy) <= zone
             }
             if inZone { return }                    // lock still valid and in-zone
             targetLockId = nil                      // died, left view, or left the zone
         }
-        let acquired = useMesh ? meshLockableEnemy(zone: zone)
-                               : voxel.lockableEnemy(in: enemies, camera: camera,
-                                                     crosshairX: cx, crosshairY: cy, zoneRadius: zone)
-        if let idx = acquired { targetLockId = enemies.enemies[idx].id }
+        if let idx = meshLockableEnemy(zone: zone) { targetLockId = enemies.enemies[idx].id }
     }
 
     /// Start the warp: generate the next planet on a background thread while a
@@ -627,34 +610,33 @@ final class Renderer: NSObject, MTKViewDelegate {
         unlockPerks(reaching: level)
         state = .warping
         warpPhase = 0; warpTime = 0; warpReady = false
-        warpTerrain = nil; warpVoxel = nil; warpStructures = nil; warpEnemies = nil
+        warpTerrain = nil; warpStructures = nil; warpEnemies = nil
         warpCam = camera                                  // ascent continues from here
         audio.whoosh(rising: true)                        // lift-off
 
         let p = level
         let seed = Renderer.planetSeed(p)
         let theme = PlanetTheme.forPlanet(p)
-        let w = RenderConfig.width, h = RenderConfig.height
         let ec = Renderer.enemyCount(forPlanet: p), diff = Renderer.difficulty(forPlanet: p)
         DispatchQueue.global(qos: .userInitiated).async {
             let t = Terrain(seed: seed, theme: theme)
-            let vox = VoxelRenderer(width: w, height: h, terrain: t)
             let str = StructureField(terrain: t, around: 512, cy: 512, count: 5, seed: seed ^ 0x00AB_CDEF)
             let en = EnemyField(terrain: t, around: 512, cy: 512, count: ec, difficulty: diff, seed: seed ^ 0x00DE_F123)
             DispatchQueue.main.async {
-                self.warpTerrain = t; self.warpVoxel = vox
+                self.warpTerrain = t
                 self.warpStructures = str; self.warpEnemies = en
                 self.warpReady = true
-                self.mesh?.stageTerrain(t)      // build the new patch off-thread for an instant commit
+                self.mesh.stageTerrain(t)       // build the new patch off-thread for an instant commit
             }
         }
     }
 
     private func finalizeWarp() {
-        guard let t = warpTerrain, let vox = warpVoxel, let str = warpStructures, let en = warpEnemies else { return }
-        terrain = t; voxel = vox; structures = str; enemies = en      // score (combat) carries over
-        camera = Camera.start(over: t, renderHeight: RenderConfig.height)
-        mesh?.commitStagedTerrain(fallback: t)                        // instant swap (staged during the cut-scene)
+        guard let t = warpTerrain, let str = warpStructures, let en = warpEnemies else { return }
+        terrain = t; structures = str; enemies = en      // score (combat) carries over
+        canvas.mapSize = Float(t.size)                   // radar wrap for the new world
+        camera = Camera.start(over: t)
+        mesh.commitStagedTerrain(fallback: t)                         // instant swap (staged during the cut-scene)
         resetCamera6(over: t)
         projectiles = ProjectileField(); bombs = ProjectileField(); smoke = SmokeField(terrain: t)
         shield = maxShield; shieldRechargeDelay = 0; damageFlash = 0
@@ -662,12 +644,12 @@ final class Renderer: NSObject, MTKViewDelegate {
         voiceLowArmed = true; voiceCritArmed = true; motherAnnounced = false
         attackCalloutTimer = 0; prevVoiceStructHealth = 0; structureBurstDone.removeAll()
         input.resetControls()
-        warpTerrain = nil; warpVoxel = nil; warpStructures = nil; warpEnemies = nil
+        warpTerrain = nil; warpStructures = nil; warpEnemies = nil
         state = .playing
     }
 
     /// Draw the dashboard chronometer (live stardate/clock + mission-elapsed time).
-    private func chrono(on vox: VoxelRenderer) {
+    private func chrono(on vox: Canvas2D) {
         let now = Date()
         let met = Int(missionTime)
         vox.drawChronometer(date: dateFmt.string(from: now), clock: clockFmt.string(from: now),
@@ -691,11 +673,11 @@ final class Renderer: NSObject, MTKViewDelegate {
                 if warpPhase == 2 { audio.warp() }
                 if warpPhase == 4 {
                     audio.whoosh(rising: false)             // re-entry
-                    warpCam = Camera.start(over: warpTerrain ?? terrain, renderHeight: RenderConfig.height)
+                    warpCam = Camera.start(over: warpTerrain ?? terrain)
                     warpCam.x = 512; warpCam.y = 512; warpCam.angle = 0
-                    // Mesh mode flies the descent over the NEW world, so commit
-                    // the staged patch now (finalizeWarp's commit becomes a no-op).
-                    if useMesh, let nt = warpTerrain { mesh?.commitStagedTerrain(fallback: nt) }
+                    // The descent flies over the NEW world, so commit the staged
+                    // patch now (finalizeWarp's commit becomes a no-op).
+                    if let nt = warpTerrain { mesh.commitStagedTerrain(fallback: nt) }
                 }
                 if warpPhase >= 5 { finalizeWarp(); return }
             }
@@ -710,7 +692,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         // stay "in the ship" the whole time (no sudden EVA). The radar scope is
         // empty in transit (`blips: false`) — contact drops the moment we depart,
         // and the new world's blips only paint on the descent.
-        func panel(_ vox: VoxelRenderer, _ cam: Camera, _ str: StructureField, _ en: EnemyField, _ t: Terrain,
+        func panel(_ vox: Canvas2D, _ cam: Camera, _ str: StructureField, _ en: EnemyField, _ t: Terrain,
                    blips: Bool) {
             let alt = max(0, Int(cam.height - t.heightF(cam.x, cam.y)))
             vox.drawCockpit(score: combat.score, basesStanding: str.standing, basesTotal: str.structures.count,
@@ -725,69 +707,58 @@ final class Renderer: NSObject, MTKViewDelegate {
         switch warpPhase {
         case 0:   // ascent — climb out of the current world
             warpCam.height = camera.height + p * p * 1400
-            warpCam.horizon = camera.horizon + p * Float(H) * 0.55
             warpCam.x += -sinf(warpCam.angle) * 36 * dt
             warpCam.y += -cosf(warpCam.angle) * 36 * dt
-            if useMesh, let m = mesh {
-                // Same climb through the live engine: the nose lifts as the climb
-                // steepens (the voxel path's rising horizon), so departure matches
-                // gameplay instead of cutting back to the raycaster.
-                let pos = SIMD3<Float>(warpCam.x, warpCam.y, warpCam.height)
-                let c6 = Camera6DOF.restricted(position: pos, heading: warpCam.angle,
-                                               pitch: 0.5 * p, bank: 0, speed: 260)
-                m.recenterIfNeeded(around: pos)
-                m.renderInto(voxel.framebuffer, camera: c6)
-            } else {
-                voxel.render(camera: warpCam)
-            }
-            voxel.dimScreen(p > 0.7 ? (p - 0.7) / 0.3 : 0)
-            panel(voxel, warpCam, structures, enemies, terrain, blips: false)
-            voxel.drawUnicodeCentered("DEPARTING", y: labelY, fontSize: 14, 0.82, 0.9, 1.0)
-            present(in: view, from: voxel)
+            // Climb through the live engine: the nose lifts as the climb steepens,
+            // so departure matches gameplay seamlessly.
+            let ascentPos = SIMD3<Float>(warpCam.x, warpCam.y, warpCam.height)
+            let ascentCam = Camera6DOF.restricted(position: ascentPos, heading: warpCam.angle,
+                                                  pitch: 0.5 * p, bank: 0, speed: 260)
+            mesh.recenterIfNeeded(around: ascentPos)
+            mesh.renderInto(canvas.framebuffer, camera: ascentCam)
+            canvas.dimScreen(p > 0.7 ? (p - 0.7) / 0.3 : 0)
+            panel(canvas, warpCam, structures, enemies, terrain, blips: false)
+            canvas.drawUnicodeCentered("DEPARTING", y: labelY, fontSize: 14, 0.82, 0.9, 1.0)
+            present(in: view, from: canvas)
         case 1:   // orbit — the planet we left, shrinking
-            voxel.clearSpace(warpTime)
-            voxel.drawGlobe(cx: W / 2, cy: H / 2 - Int(18 * p), r: max(1, Int(120 - 84 * p)),
+            canvas.clearSpace(warpTime)
+            canvas.drawGlobe(cx: W / 2, cy: H / 2 - Int(18 * p), r: max(1, Int(120 - 84 * p)),
                             base: globeColor(terrain.theme))
-            panel(voxel, warpCam, structures, enemies, terrain, blips: false)
-            voxel.drawUnicodeCentered("LEAVING ORBIT", y: labelY, fontSize: 14, 0.82, 0.9, 1.0)
-            present(in: view, from: voxel)
+            panel(canvas, warpCam, structures, enemies, terrain, blips: false)
+            canvas.drawUnicodeCentered("LEAVING ORBIT", y: labelY, fontSize: 14, 0.82, 0.9, 1.0)
+            present(in: view, from: canvas)
         case 2:   // hyperspace
-            voxel.drawHyperspace(time: warpTime, progress: p)
-            panel(voxel, warpCam, structures, enemies, terrain, blips: false)
-            voxel.drawUnicodeCentered("HYPERSPACE", y: labelY, fontSize: 16, 0.85, 0.92, 1.0)
-            present(in: view, from: voxel)
+            canvas.drawHyperspace(time: warpTime, progress: p)
+            panel(canvas, warpCam, structures, enemies, terrain, blips: false)
+            canvas.drawUnicodeCentered("HYPERSPACE", y: labelY, fontSize: 16, 0.85, 0.92, 1.0)
+            present(in: view, from: canvas)
         case 3:   // approach — the new planet growing
-            voxel.clearSpace(warpTime + 11)
-            voxel.drawGlobe(cx: W / 2, cy: H / 2, r: Int(20 + 112 * p),
+            canvas.clearSpace(warpTime + 11)
+            canvas.drawGlobe(cx: W / 2, cy: H / 2, r: Int(20 + 112 * p),
                             base: globeColor(warpTerrain?.theme ?? terrain.theme))
-            panel(voxel, warpCam, structures, enemies, terrain, blips: false)
-            voxel.drawUnicodeCentered("APPROACHING \(PlanetTheme.name(forLevel: level).uppercased())", y: labelY, fontSize: 13, 0.85, 0.92, 1.0)
-            present(in: view, from: voxel)
+            panel(canvas, warpCam, structures, enemies, terrain, blips: false)
+            canvas.drawUnicodeCentered("APPROACHING \(PlanetTheme.name(forLevel: level).uppercased())", y: labelY, fontSize: 13, 0.85, 0.92, 1.0)
+            present(in: view, from: canvas)
         default:  // 4: descent — drop into the new world
-            if let nv = warpVoxel, let nt = warpTerrain, let ns = warpStructures, let ne = warpEnemies {
+            if let nt = warpTerrain, let ns = warpStructures, let ne = warpEnemies {
                 let g = nt.heightF(512, 512)
                 let pe = 1 - (1 - p) * (1 - p)              // ease out
                 warpCam.height = (g + 760) + ((g + 140) - (g + 760)) * pe
-                warpCam.horizon = Float(H) * (0.85 - 0.45 * p)
-                if useMesh, let m = mesh {
-                    // The staged patch was committed at phase entry, so the mesh
-                    // already holds the NEW world: flare in nose-high and settle
-                    // level as the altitude bleeds off — no renderer cut at the
-                    // playing handoff. No recenter here: the stride-1 patch is
-                    // exactly what gameplay resumes on, and re-LODding for the
-                    // brief high-altitude pass would just thrash rebuilds — the
-                    // close fog at entry reads as re-entry haze burning off.
-                    let pos = SIMD3<Float>(warpCam.x, warpCam.y, warpCam.height)
-                    let c6 = Camera6DOF.restricted(position: pos, heading: warpCam.angle,
-                                                   pitch: 0.45 * (1 - p), bank: 0, speed: 260)
-                    m.renderInto(nv.framebuffer, camera: c6)
-                } else {
-                    nv.render(camera: warpCam)
-                }
-                nv.dimScreen(p < 0.3 ? (0.3 - p) / 0.3 : 0)
-                panel(nv, warpCam, ns, ne, nt, blips: true)
-                nv.drawUnicodeCentered("\(PlanetTheme.name(forLevel: level).uppercased())   ·   LEVEL \(level)", y: labelY, fontSize: 14, 0.85, 0.92, 1.0)
-                present(in: view, from: nv)
+                // The staged patch was committed at phase entry, so the mesh
+                // already holds the NEW world: flare in nose-high and settle
+                // level as the altitude bleeds off — no renderer cut at the
+                // playing handoff. No recenter here: the stride-1 patch is
+                // exactly what gameplay resumes on, and re-LODding for the brief
+                // high-altitude pass would just thrash rebuilds — the close fog
+                // at entry reads as re-entry haze burning off.
+                let pos = SIMD3<Float>(warpCam.x, warpCam.y, warpCam.height)
+                let c6 = Camera6DOF.restricted(position: pos, heading: warpCam.angle,
+                                               pitch: 0.45 * (1 - p), bank: 0, speed: 260)
+                mesh.renderInto(canvas.framebuffer, camera: c6)
+                canvas.dimScreen(p < 0.3 ? (0.3 - p) / 0.3 : 0)
+                panel(canvas, warpCam, ns, ne, nt, blips: true)
+                canvas.drawUnicodeCentered("\(PlanetTheme.name(forLevel: level).uppercased())   ·   LEVEL \(level)", y: labelY, fontSize: 14, 0.85, 0.92, 1.0)
+                present(in: view, from: canvas)
             }
         }
     }
@@ -832,9 +803,46 @@ final class Renderer: NSObject, MTKViewDelegate {
         missionTime = 0
         loadPlanet(1)           // stage a clean run (also sets state = .playing)…
         state = .title          // …but show the attract screen until ENGAGE
+        mesh.setTerrain(titleTerrain)          // attract flyover shows the title world
         input.resetControls()
         lastTitleBeat = -1; musicClock = 0      // restart the title theme cleanly
         audio.uiStart()
+    }
+
+    /// Advance the attract-screen flyover and render its backdrop through the
+    /// mesh renderer into the shared canvas framebuffer. Shared by the title,
+    /// briefing and codex states (each then draws its own 2D overlay on top).
+    /// The legacy `titleCam` path math is unchanged; it drives a `Camera6DOF`
+    /// exactly as the warp ascent does. The 2D overlays composite afterwards.
+    private func attractFlyover() {
+        let step: Float = 1.0 / 60.0
+        titleTime += step
+        titleCam.angle = sinf(titleTime * 0.09) * 0.28
+        titleCam.x += -sinf(titleCam.angle) * 26 * step
+        titleCam.y += -cosf(titleCam.angle) * 26 * step
+        // Ease altitude so it doesn't snap as we cross terrain cells (the jitter).
+        let targetH = titleTerrain.heightF(titleCam.x, titleCam.y) + 95
+        titleCam.height += (targetH - titleCam.height) * min(1, step * 2.5)
+        audio.engine(on: false, speed: 0)
+        // (Title music is sequenced by musicTimer, not per-frame here.)
+
+        let pos = SIMD3<Float>(titleCam.x, titleCam.y, titleCam.height)
+        let c6 = Camera6DOF.restricted(position: pos, heading: titleCam.angle,
+                                       pitch: 0, bank: 0, speed: titleCam.speed)
+        mesh.recenterIfNeeded(around: pos)
+        mesh.renderInto(canvas.framebuffer, camera: c6)
+    }
+
+    /// ENGAGE from an attract screen → begin play. Swaps the mesh terrain back
+    /// to the game world (the title showed the random attract world).
+    private func engageFromTitle() {
+        restartLatch = true
+        input.resetControls()        // start neutral, not mid-turn
+        audio.uiStart()
+        lastTitleBeat = -1
+        missionTime = 0              // fresh mission clock
+        mesh.setTerrain(terrain)    // back to the game world (planet 1)
+        state = .playing
     }
 
     func draw(in view: MTKView) {
@@ -872,26 +880,9 @@ final class Renderer: NSObject, MTKViewDelegate {
         // Title / attract screen — wait for Enter to drop into the (already
         // built) planet 1, then run the normal pipeline from the next frame.
         if state == .title {
-            // Fixed step → smooth motion regardless of frame-time wobble.
-            let step: Float = 1.0 / 60.0
-            titleTime += step
-            titleCam.angle = sinf(titleTime * 0.09) * 0.28
-            titleCam.x += -sinf(titleCam.angle) * 26 * step
-            titleCam.y += -cosf(titleCam.angle) * 26 * step
-            // Ease altitude so it doesn't snap as we cross terrain cells (the jitter).
-            let targetH = titleTerrain.heightF(titleCam.x, titleCam.y) + 95
-            titleCam.height += (targetH - titleCam.height) * min(1, step * 2.5)
-            audio.engine(on: false, speed: 0)
-            // (Title music is sequenced by musicTimer, not per-frame here.)
+            attractFlyover()                 // randomly-themed flyover (mesh renderer)
 
-            if input.restart && !restartLatch {
-                restartLatch = true
-                input.resetControls()        // start neutral, not mid-turn
-                audio.uiStart()
-                lastTitleBeat = -1
-                missionTime = 0              // fresh mission clock
-                state = .playing
-            }
+            if input.restart && !restartLatch { engageFromTitle() }
             if !input.restart { restartLatch = false }
 
             if input.briefing && !briefingLatch {
@@ -910,35 +901,20 @@ final class Renderer: NSObject, MTKViewDelegate {
             }
             if !input.codex { codexLatch = false }
 
-            titleVoxel.render(camera: titleCam)                      // randomly-themed flyover
-            titleVoxel.drawTitleScreen(time: titleTime,
-                                       topName: highScores.entries.first?.name,
-                                       topScore: highScores.entries.first?.score ?? 0)
-            present(in: view, from: titleVoxel)
+            canvas.drawTitleScreen(time: titleTime,
+                                  topName: highScores.entries.first?.name,
+                                  topScore: highScores.entries.first?.score ?? 0)
+            present(in: view, from: canvas)
             return
         }
 
         // Mission briefing — a scrolling transmission over the attract flyover.
         if state == .briefing {
-            let step: Float = 1.0 / 60.0
-            titleTime += step
-            briefingTime += step
-            titleCam.angle = sinf(titleTime * 0.09) * 0.28
-            titleCam.x += -sinf(titleCam.angle) * 26 * step
-            titleCam.y += -cosf(titleCam.angle) * 26 * step
-            let targetH = titleTerrain.heightF(titleCam.x, titleCam.y) + 95
-            titleCam.height += (targetH - titleCam.height) * min(1, step * 2.5)
-            audio.engine(on: false, speed: 0)
+            attractFlyover()
+            briefingTime += 1.0 / 60.0
 
             // ENTER engages (starts the game); B stands down (back to title).
-            if input.restart && !restartLatch {
-                restartLatch = true
-                input.resetControls()
-                audio.uiStart()
-                lastTitleBeat = -1
-                missionTime = 0
-                state = .playing
-            }
+            if input.restart && !restartLatch { engageFromTitle() }
             if !input.restart { restartLatch = false }
             if (input.briefing || input.back) && !briefingLatch {
                 briefingLatch = true
@@ -947,33 +923,18 @@ final class Renderer: NSObject, MTKViewDelegate {
             }
             if !input.briefing && !input.back { briefingLatch = false }
 
-            titleVoxel.render(camera: titleCam)
-            titleVoxel.drawBriefing(time: briefingTime)
-            present(in: view, from: titleVoxel)
+            canvas.drawBriefing(time: briefingTime)
+            present(in: view, from: canvas)
             return
         }
 
         // Enemy-craft codex — rotating model database over the attract flyover.
         if state == .codex {
-            let step: Float = 1.0 / 60.0
-            titleTime += step
-            codexTime += step
-            titleCam.angle = sinf(titleTime * 0.09) * 0.28
-            titleCam.x += -sinf(titleCam.angle) * 26 * step
-            titleCam.y += -cosf(titleCam.angle) * 26 * step
-            let targetH = titleTerrain.heightF(titleCam.x, titleCam.y) + 95
-            titleCam.height += (targetH - titleCam.height) * min(1, step * 2.5)
-            audio.engine(on: false, speed: 0)
+            attractFlyover()
+            codexTime += 1.0 / 60.0
 
             // ENTER engages (starts the game); V closes (back to title).
-            if input.restart && !restartLatch {
-                restartLatch = true
-                input.resetControls()
-                audio.uiStart()
-                lastTitleBeat = -1
-                missionTime = 0
-                state = .playing
-            }
+            if input.restart && !restartLatch { engageFromTitle() }
             if !input.restart { restartLatch = false }
             if (input.codex || input.back) && !codexLatch {
                 codexLatch = true
@@ -982,9 +943,8 @@ final class Renderer: NSObject, MTKViewDelegate {
             }
             if !input.codex && !input.back { codexLatch = false }
 
-            titleVoxel.render(camera: titleCam)
-            titleVoxel.drawCodex(time: codexTime)
-            present(in: view, from: titleVoxel)
+            canvas.drawCodex(time: codexTime)
+            present(in: view, from: canvas)
             return
         }
 
@@ -1007,15 +967,12 @@ final class Renderer: NSObject, MTKViewDelegate {
         let flying = ((state == .playing || state == .won) && !paused && !gamepad.configuring)
 
         if flying {
-            // Mesh mode flies the authoritative 6DOF camera (and syncs `camera`);
-            // voxel mode runs the legacy flight model directly.
-            if useMesh { updateMeshFlight(dt: dt) }
-            else { camera.update(dt: dt, input: input, terrain: terrain) }
+            // Fly the authoritative 6DOF camera; the legacy `camera` is synced
+            // from it for the HUD/radar/AI/audio that still read scalar fields.
+            updateMeshFlight(dt: dt)
         }
-        // Voxel mode renders the world now so the depth buffer is ready for the
-        // reticle hit-test below. Mesh mode renders after the game logic (it
-        // projects through `camera6` and draws the final craft positions).
-        if !useMesh { voxel.render(camera: camera) }
+        // The world is rendered after the game logic (below): it projects through
+        // `camera6` and draws the final craft positions for the frame.
 
         if active {
             // Radial pulse weapon (feature flag): wipe every remaining craft.
@@ -1057,15 +1014,12 @@ final class Renderer: NSObject, MTKViewDelegate {
             // fire hit-test so fire can be redirected to the locked craft.
             if hasTargetingComputer { updateTargetLock() } else { targetLockId = nil }
             var lockedIdx = targetLockId.flatMap { enemies.index(forId: $0) }
-            // Mesh mode resolves the fire target through the quaternion projection
-            // (and disables the voxel reticle fallback). With a targeting-computer
-            // lock that wins; otherwise fire follows whatever's under the reticle.
-            if useMesh && lockedIdx == nil { lockedIdx = meshTargetedEnemy() }
-            // Player-fire hit-test BEFORE drawing sprites: in voxel mode the depth
-            // buffer must hold terrain only, or a craft would occlude its own shot.
-            combat.update(dt: dt, input: input, camera: camera, field: enemies, voxel: voxel, smoke: smoke,
-                          crosshairX: RenderConfig.crosshairX, crosshairY: RenderConfig.crosshairY,
-                          lockedTargetIndex: lockedIdx, useReticleFallback: !useMesh)
+            // Resolve the fire target through the quaternion projection. A
+            // targeting-computer lock wins; otherwise fire follows whatever's
+            // under the reticle (nil ⇒ fire but miss, tracer only).
+            if lockedIdx == nil { lockedIdx = meshTargetedEnemy() }
+            combat.update(dt: dt, input: input, field: enemies, smoke: smoke,
+                          lockedTargetIndex: lockedIdx)
             // Advance enemy fire (hits drain hull) and the visible bombs
             // (aimed at structures — kept off the player by a far aim point).
             let hits = projectiles.update(dt: dt, playerX: camera.x, playerY: camera.y,
@@ -1111,8 +1065,8 @@ final class Renderer: NSObject, MTKViewDelegate {
             if curHP < prevVoiceStructHealth {
                 // A base was damaged or destroyed → the heightfield was re-stamped
                 // (crumble look / ground restored). Rebuild the mesh patch so the
-                // change shows up; the voxel path samples live, so it's a no-op there.
-                mesh?.markTerrainDirty()
+                // change shows up; the canvas path samples live, so it's a no-op there.
+                mesh.markTerrainDirty()
                 if attackCalloutTimer <= 0 { comms.say("Command post under attack"); attackCalloutTimer = 12 }
             }
             prevVoiceStructHealth = curHP
@@ -1176,54 +1130,35 @@ final class Renderer: NSObject, MTKViewDelegate {
 
         if flying { smoke.update(dt: dt, structures: structures, maxHealth: structures.maxHealth) }
 
-        // World render. Mesh mode draws terrain + craft + effects on the GPU and
+        // World render: the GPU mesh pass draws terrain + craft + effects and
         // reads the frame back into the framebuffer; everything below composites
-        // 2D over it. Voxel mode draws the craft as CPU sprites over its raycast.
-        if useMesh {
-            mesh?.recenterIfNeeded(around: camera6.position)
-            mesh?.renderInto(voxel.framebuffer, camera: camera6,
-                             entities: meshEntities(), fx: meshFX())
-        } else {
-            voxel.drawEnemies(enemies, camera: camera)
-        }
+        // 2D over it.
+        mesh.recenterIfNeeded(around: camera6.position)
+        mesh.renderInto(canvas.framebuffer, camera: camera6,
+                        entities: meshEntities(), fx: meshFX())
         // Targeting computer: red dotted box around the locked craft.
-        if hasTargetingComputer, let li = targetLockId.flatMap({ enemies.index(forId: $0) }) {
-            if useMesh {
-                if let p = meshProject(enemyAt: li) {
-                    voxel.drawLockBox(screenX: p.x, screenY: p.y,
-                                      half: enemies.scale(for: enemies.enemies[li].kind) * p.radiusScale,
-                                      color: packRGBA(255, 60, 60))
-                }
-            } else {
-                voxel.drawLockBox(forEnemyAt: li, in: enemies, camera: camera, color: packRGBA(255, 60, 60))
-            }
-        }
-        if !useMesh {
-            voxel.drawExplosions(combat.explosions, duration: combat.explosionDuration, camera: camera)
-            voxel.drawProjectiles(bombs, camera: camera,                   // ordnance on bases — orange-red
-                                  glow: packRGBA(255, 120, 40), core: packRGBA(255, 220, 130))
-            voxel.drawProjectiles(projectiles, camera: camera)             // fire at you — hot yellow
-            voxel.drawSmoke(smoke, camera: camera)                         // damage plumes + debris
+        if hasTargetingComputer, let li = targetLockId.flatMap({ enemies.index(forId: $0) }),
+           let p = meshProject(enemyAt: li) {
+            canvas.drawLockBox(screenX: p.x, screenY: p.y,
+                              half: enemies.scale(for: enemies.enemies[li].kind) * p.radiusScale,
+                              color: packRGBA(255, 60, 60))
         }
         if combat.tracerActive {
             // Bolts converge on the locked craft when the targeting computer
             // has a lock, otherwise on the fixed reticle.
             var tx = RenderConfig.crosshairX, ty = RenderConfig.crosshairY
-            if hasTargetingComputer, let li = targetLockId.flatMap({ enemies.index(forId: $0) }) {
-                if useMesh {
-                    if let p = meshProject(enemyAt: li) { tx = p.x; ty = p.y }
-                } else if let sp = voxel.screenPosition(ofEnemyAt: li, in: enemies, camera: camera) {
-                    tx = sp.x; ty = sp.y
-                }
+            if hasTargetingComputer, let li = targetLockId.flatMap({ enemies.index(forId: $0) }),
+               let p = meshProject(enemyAt: li) {
+                tx = p.x; ty = p.y
             }
-            voxel.drawTracers(crosshairX: tx, crosshairY: ty)
+            canvas.drawTracers(crosshairX: tx, crosshairY: ty)
         }
-        voxel.drawDamageFlash(damageFlash)
+        canvas.drawDamageFlash(damageFlash)
         if active {
-            voxel.drawCrosshair(x: RenderConfig.crosshairX, y: RenderConfig.crosshairY)
+            canvas.drawCrosshair(x: RenderConfig.crosshairX, y: RenderConfig.crosshairY)
         }
 
-        voxel.drawCockpit(score: combat.score,
+        canvas.drawCockpit(score: combat.score,
                           basesStanding: structures.standing,
                           basesTotal: structures.structures.count,
                           aliens: enemies.remaining,
@@ -1232,35 +1167,31 @@ final class Renderer: NSObject, MTKViewDelegate {
                           altitude: max(0, Int(camera.height - terrain.heightF(camera.x, camera.y))),
                           shield: Int(shield), maxShield: Int(maxShield),
                           roll: camera.roll, pitch: camera.pitch)
-        if useMesh {
-            // Scope basis from the SMOOTHED ground heading (not the raw camera
-            // basis): at steep bank/pitch the basis vectors' ground projections
-            // collapse and whip around — deriving an orthonormal basis from one
-            // eased heading keeps the scope steady through rolls and loops.
-            // Handedness matches camera6's (at heading 0: fwd (0,-1), right (-1,0)).
-            let fx = -sinf(radarHeading), fy = -cosf(radarHeading)
-            voxel.drawRadar(originX: camera6.position.x, originY: camera6.position.y,
-                            fwdX: fx, fwdY: fy, rightX: fy, rightY: -fx,
-                            enemies: enemies, structures: structures)
-        } else {
-            voxel.drawRadar(camera: camera, enemies: enemies, structures: structures)
-        }
-        chrono(on: voxel)
-        if hasRadialPulse { voxel.drawPulseCharges(pulseCharges) }
-        if hasCloak { voxel.drawCloakStatus(active: cloakActive, cooldown: cloakCooldown) }
+        // Scope basis from the SMOOTHED ground heading (not the raw camera
+        // basis): at steep bank/pitch the basis vectors' ground projections
+        // collapse and whip around — deriving an orthonormal basis from one
+        // eased heading keeps the scope steady through rolls and loops.
+        // Handedness matches camera6's (at heading 0: fwd (0,-1), right (-1,0)).
+        let fx = -sinf(radarHeading), fy = -cosf(radarHeading)
+        canvas.drawRadar(originX: camera6.position.x, originY: camera6.position.y,
+                        fwdX: fx, fwdY: fy, rightX: fy, rightY: -fx,
+                        enemies: enemies, structures: structures)
+        chrono(on: canvas)
+        if hasRadialPulse { canvas.drawPulseCharges(pulseCharges) }
+        if hasCloak { canvas.drawCloakStatus(active: cloakActive, cooldown: cloakCooldown) }
         if let banner = perkBanner, perkBannerTimer > 0, state != .title, state != .lost {
-            voxel.drawNotification(banner, t: perkBannerTimer)
+            canvas.drawNotification(banner, t: perkBannerTimer)
         }
 
         if paused && state == .playing {
-            voxel.drawBanner(title: "PAUSED", subtitle: "PRESS P TO RESUME")
+            canvas.drawBanner(title: "PAUSED", subtitle: "PRESS P TO RESUME")
         } else {
             switch state {
             case .lost:
                 if awaitingName {
-                    voxel.drawNameEntry(score: combat.score, name: input.nameBuffer)
+                    canvas.drawNameEntry(score: combat.score, name: input.nameBuffer)
                 } else {
-                    voxel.drawGameOver(loseReason: loseReason, score: combat.score,
+                    canvas.drawGameOver(loseReason: loseReason, score: combat.score,
                                        scores: highScores.entries, highlight: newScoreRank)
                 }
             case .won:
@@ -1273,7 +1204,7 @@ final class Renderer: NSObject, MTKViewDelegate {
                 // cleared world with a clear view.
                 wonTime += dt
                 let fade: Float = wonTime < 10 ? 1 : max(0.1, 1 - (wonTime - 10) * 0.9)  // → 0.1 over 1 s
-                voxel.drawBanner(title: "\(PlanetTheme.name(forLevel: level).uppercased()) SECURED",
+                canvas.drawBanner(title: "\(PlanetTheme.name(forLevel: level).uppercased()) SECURED",
                                  subtitle: "LEVEL \(level) CLEAR    \(warpPrompt)",
                                  opacity: fade)
             case .playing, .title, .briefing, .codex, .warping:
@@ -1289,11 +1220,11 @@ final class Renderer: NSObject, MTKViewDelegate {
         prevStanding = structures.standing
         prevTracer = combat.tracerActive
 
-        present(in: view, from: voxel)
+        present(in: view, from: canvas)
     }
 
     /// Upload the given renderer's framebuffer and blit it to the drawable.
-    private func present(in view: MTKView, from vr: VoxelRenderer) {
+    private func present(in view: MTKView, from vr: Canvas2D) {
         if FeatureFlags.showFPS { vr.drawFPS(Int(fpsSmoothed.rounded())) }
         if screenshotPending { screenshotPending = false; saveScreenshot(from: vr) }
         let region = MTLRegionMake2D(0, 0, RenderConfig.width, RenderConfig.height)
@@ -1341,7 +1272,7 @@ final class Renderer: NSObject, MTKViewDelegate {
     /// Save the just-rendered framebuffer (feature flag) as a PNG on the Desktop,
     /// upscaled 4× nearest-neighbour (480×270 → 1920×1080) so the pixels stay
     /// crisp — ready for the README / product page / blog.
-    private func saveScreenshot(from vr: VoxelRenderer) {
+    private func saveScreenshot(from vr: Canvas2D) {
         let w = RenderConfig.width, h = RenderConfig.height
         guard let native = NSBitmapImageRep(
             bitmapDataPlanes: nil, pixelsWide: w, pixelsHigh: h,

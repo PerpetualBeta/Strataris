@@ -1,10 +1,11 @@
 // Strataris — combat.
 //
-// Hitscan firing against the reticle. Holding fire auto-repeats on a
-// cooldown; each shot targets the nearest non-occluded craft sitting under
-// the reticle (the projection + terrain depth test live in VoxelRenderer).
-// A hit removes the craft and spawns an explosion; every shot leaves a brief
-// tracer for feedback whether it connected or not.
+// Hitscan firing against the reticle. Holding fire auto-repeats on a cooldown.
+// The caller resolves the target craft through the quaternion camera's
+// projection and passes it in `lockedTargetIndex` (a targeting-computer lock,
+// or whatever sits under the reticle); a nil target means "fire but miss"
+// (tracer only). A hit removes the craft and spawns an explosion; every shot
+// leaves a brief tracer for feedback whether it connected or not.
 //
 // Projectiles are instantaneous for now — crisp and arcade-y. When enemies
 // start moving fast we can swap in travelling bolts behind the same call.
@@ -31,28 +32,19 @@ final class Combat {
 
     var tracerActive: Bool { tracerTimer > 0 }
 
-    /// `lockedTargetIndex`: when the Targeting Computer has a lock, fire is
-    /// directed at that (moving) craft instead of whatever sits under the reticle.
-    /// `useReticleFallback`: when true (voxel renderer), an absent
-    /// `lockedTargetIndex` falls back to the yaw-only `voxel.targetedEnemy` hit
-    /// test. The mesh renderer projects through the quaternion camera instead and
-    /// passes the resolved target in `lockedTargetIndex`, so it sets this false —
-    /// a nil target then means "fire but miss" (tracer only), as intended.
-    func update(dt: Float, input: InputState, camera: Camera,
-                field: EnemyField, voxel: VoxelRenderer, smoke: SmokeField,
-                crosshairX: Float, crosshairY: Float, lockedTargetIndex: Int? = nil,
-                useReticleFallback: Bool = true) {
+    /// `lockedTargetIndex`: the craft fire is directed at (a targeting-computer
+    /// lock, or whatever the reticle is over, resolved by the caller through the
+    /// quaternion projection). nil ⇒ fire but miss (tracer only).
+    func update(dt: Float, input: InputState,
+                field: EnemyField, smoke: SmokeField,
+                lockedTargetIndex: Int? = nil) {
         fireCooldown = max(0, fireCooldown - dt)
         tracerTimer = max(0, tracerTimer - dt)
 
         if input.fire && fireCooldown <= 0 {
             fireCooldown = fireInterval
             tracerTimer = 0.07
-            let target = useReticleFallback
-                ? (lockedTargetIndex ?? voxel.targetedEnemy(in: field, camera: camera,
-                                                            crosshairX: crosshairX, crosshairY: crosshairY))
-                : lockedTargetIndex
-            if let idx = target {
+            if let idx = lockedTargetIndex {
                 let e = field.enemies[idx]
                 explosions.append(Explosion(x: e.x, y: e.y, z: e.z, age: 0))
                 if let pts = field.hit(at: idx) {   // nil = damaged but not destroyed (mothership)
