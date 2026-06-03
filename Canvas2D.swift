@@ -674,51 +674,109 @@ final class Canvas2D {
     /// The logo + prompts, composited over whatever the flyover already drew.
     /// Dark gradient bands top and bottom keep the text legible against the
     /// moving terrain.
-    func drawTitleScreen(time: Float, topName: String?, topScore: Int) {
-        let fb = framebuffer
+    /// `configHint`: a context-aware "configure controls" line (controller vs
+    /// keyboard) built by the caller. `nebula`: per-planet-theme tint (0…1) for
+    /// the title sky's nebula glow.
+    func drawTitleScreen(time: Float, topName: String?, topScore: Int,
+                         startHint: String, configHint: String, nebula: (CGFloat, CGFloat, CGFloat)) {
         let W = width, H = height
         let Hf = Float(H)
 
-        // Legibility: darken a band at the top (behind the logo) and bottom
-        // (behind the prompts), fading into the live scene.
-        let topBand = Int(Hf * 0.46)
-        for y in 0..<topBand {
-            let keep = 0.28 + 0.72 * (Float(y) / Float(topBand))
-            let row = y * W
-            for x in 0..<W { fb[row + x] = darken(fb[row + x], keep) }
-        }
-        let botStart = Int(Hf * 0.72)
-        for y in botStart..<H {
-            let keep = 0.28 + 0.72 * (Float(H - 1 - y) / Float(max(1, H - botStart)))
-            let row = y * W
-            for x in 0..<W { fb[row + x] = darken(fb[row + x], keep) }
-        }
+        // One even contrast scrim over the WHOLE display (not the old two bands):
+        // enough to read the logo and text on bright worlds (e.g. the ice planet)
+        // without the banding, and it makes the starfield read against it.
+        dimAll(0.6)
 
-        // Title wordmark (bespoke ArcadeClassic-style logo) + subtitle.
-        let ty = Int(Hf * 0.07)
+        // Sky depth: a soft per-theme nebula and a parallax starfield in the
+        // upper sky, over the scrim.
+        drawTitleSky(time: time, nebula: nebula)
+
+        // Title wordmark (bespoke ArcadeClassic-style logo). Dropped down so the
+        // gaps credit→wordmark and wordmark→subtitle are even.
+        let ty = Int(Hf * 0.115)
         drawTitleLogo("STRATARIS", centerX: W / 2, topY: ty, time: time)
         let logoBottom = ty + LogoFont.glyphHeight
-        let sub = "GALACTIC COLONY DEFENCE"
-        Font.draw(sub, into: fb, w: W, h: H, x: (W - Font.width(sub, scale: 2)) / 2,
-                  y: logoBottom + 12, scale: 2, color: packRGBA(190, 218, 255))
 
-        // Prompt (blink), hi-score, controls, credit.
+        // Everything else uses the Core Text proportional font (the high-score
+        // line's treatment) — softer and more refined than the 5×7 HUD bitmap.
+        drawUnicodeCentered("Galactic Colony Defence", y: logoBottom + 12, fontSize: 17, 0.74, 0.85, 1.0)
+
         if sinf(time * 4) > -0.25 {
-            let p = "PRESS ENTER TO START"
-            Font.draw(p, into: fb, w: W, h: H, x: (W - Font.width(p, scale: 2)) / 2,
-                      y: H - 76, scale: 2, color: packRGBA(255, 255, 255))
+            drawUnicodeCentered(startHint, y: H - 80, fontSize: 17, 1.0, 1.0, 1.0)
         }
-        let menu = "[B] MISSION BRIEFING    [V] ENEMY INTEL"
-        Font.draw(menu, into: fb, w: W, h: H, x: (W - Font.width(menu, scale: 1)) / 2,
-                  y: H - 54, scale: 1, color: packRGBA(130, 200, 235))
+        drawUnicodeCentered("[B] Mission Briefing      [V] Enemy Intel", y: H - 58, fontSize: 11, 0.51, 0.78, 0.92)
         let hi = String(format: "High Score: %06d   ", topScore) + (topName ?? "---")
-        drawUnicodeCentered(hi, y: H - 38, fontSize: 11, 1.0, 0.86, 0.4)
-        let ctrl = "ARROWS STEER   SPACE FIRE   PLUS/MINUS THROTTLE   P PAUSE"
-        Font.draw(ctrl, into: fb, w: W, h: H, x: (W - Font.width(ctrl, scale: 1)) / 2,
-                  y: H - 14, scale: 1, color: packRGBA(165, 175, 200))
-        let credit = "JORVIK SOFTWARE PRESENTS"
-        Font.draw(credit, into: fb, w: W, h: H, x: (W - Font.width(credit, scale: 1)) / 2,
-                  y: 6, scale: 1, color: packRGBA(150, 160, 185))
+        drawUnicodeCentered(hi, y: H - 42, fontSize: 11, 1.0, 0.86, 0.4)
+        drawUnicodeCentered(configHint, y: H - 24, fontSize: 11, 0.66, 0.70, 0.80)
+        drawUnicodeCentered("Jorvik Software Proudly Presents", y: 5, fontSize: 10, 0.60, 0.64, 0.74)
+
+        // CRT scanlines over the whole frame — scanlines only (no vignette/bloom).
+        drawScanlines()
+    }
+
+    /// Title sky depth: a soft additive nebula glow (theme-tinted, slowly
+    /// drifting) plus a parallax starfield in the upper half, twinkling and
+    /// fading out toward the horizon. Drawn over the darkened sky band so the
+    /// stars read against a near-space backdrop regardless of the daytime theme.
+    private func drawTitleSky(time: Float, nebula: (CGFloat, CGFloat, CGFloat)) {
+        let fb = framebuffer, W = width, H = height
+        let skyH = Float(H) * 0.5
+
+        // Nebula — a soft elliptical glow up in the sky.
+        let nx = Float(W) * (0.64 + 0.04 * sinf(time * 0.03))
+        let ny = Float(H) * 0.19
+        let rx = Float(W) * 0.34, ry = Float(H) * 0.17
+        let nr = Float(nebula.0), ng = Float(nebula.1), nb = Float(nebula.2)
+        let x0 = max(0, Int(nx - rx)), x1 = min(W, Int(nx + rx))
+        let y0 = max(0, Int(ny - ry)), y1 = min(H, Int(ny + ry))
+        for y in y0..<y1 {
+            let row = y * W
+            for x in x0..<x1 {
+                let ddx = (Float(x) - nx) / rx, ddy = (Float(y) - ny) / ry
+                let d = ddx * ddx + ddy * ddy
+                if d >= 1 { continue }
+                let glow = (1 - d) * (1 - d) * 0.55
+                let c = fb[row + x]
+                let r = min(255, Float(c & 0xFF) + nr * 255 * glow)
+                let g = min(255, Float((c >> 8) & 0xFF) + ng * 255 * glow)
+                let b = min(255, Float((c >> 16) & 0xFF) + nb * 255 * glow)
+                fb[row + x] = packRGBA(UInt8(r), UInt8(g), UInt8(b))
+            }
+        }
+
+        // Starfield — deterministic positions, parallax drift, twinkle.
+        for k in 0..<90 {
+            var h = UInt32(k) &* 2_654_435_761
+            h ^= h >> 15; h = h &* 668_265_263; h ^= h >> 13
+            let bx = Float(h & 0xFFFF) / 65535 * Float(W)
+            let by = Float((h >> 16) & 0x7FFF) / 32767 * skyH
+            let layer = Float((h >> 4) & 0x3) / 3                 // 0…1 depth band
+            var sx = bx + time * (2 + layer * 9)                  // parallax: far stars drift slower
+            sx = sx.truncatingRemainder(dividingBy: Float(W)); if sx < 0 { sx += Float(W) }
+            let px = Int(sx), py = Int(by)
+            if px < 0 || px >= W || py < 0 || py >= H { continue }
+            let horizonFade = max(0, 1 - by / skyH)               // fade into the horizon
+            let twinkle = 0.65 + 0.35 * sinf(time * (1.5 + layer * 2.3) + Float(k))
+            let bright = (0.35 + 0.65 * layer) * horizonFade * twinkle
+            if bright <= 0.03 { continue }
+            let i = py * W + px
+            let c = fb[i]
+            let add = bright * 255
+            fb[i] = packRGBA(UInt8(min(255, Float(c & 0xFF) + add)),
+                             UInt8(min(255, Float((c >> 8) & 0xFF) + add)),
+                             UInt8(min(255, Float((c >> 16) & 0xFF) + add)))
+        }
+    }
+
+    /// CRT scanlines: darken alternate rows a touch across the whole frame.
+    private func drawScanlines(_ keep: Float = 0.8) {
+        let fb = framebuffer, W = width
+        var y = 1
+        while y < height {
+            let row = y * W
+            for x in 0..<W { fb[row + x] = darken(fb[row + x], keep) }
+            y += 2
+        }
     }
 
     /// Bespoke wordmark alphabet in the spirit of Pizzadude's "ArcadeClassic" —
@@ -731,7 +789,7 @@ final class Canvas2D {
         static let stripes = 7
         static let unitW   = 6             // px per unit column
         static let stripeH = 6             // px per bar
-        static let gapH    = 2             // px between bars
+        static let gapH    = 1             // px between bars
         static let tracking = 1            // blank unit columns between glyphs
         static var glyphHeight: Int { stripes * stripeH + (stripes - 1) * gapH }
 
@@ -740,8 +798,10 @@ final class Canvas2D {
             " ": (3, [0, 0, 0, 0, 0, 0, 0]),
             "S": (7, [0b0111100, 0b1100110, 0b1100000, 0b0111110, 0b0000011, 0b1100011, 0b0111110]),
             "T": (6, [0b111111,  0b001100,  0b001100,  0b001100,  0b001100,  0b001100,  0b001100]),
-            "R": (7, [0b1111110, 0b1100011, 0b1100011, 0b1100111, 0b1111100, 0b1101110, 0b1100111]),
-            "A": (7, [0b0011100, 0b0110110, 0b1100011, 0b1100011, 0b1111111, 0b1100011, 0b1100011]),
+            // R and A close their crossbar on stripe 3 — the same row as S's
+            // middle bar — so all three align horizontally.
+            "R": (7, [0b1111110, 0b1100011, 0b1100011, 0b1111110, 0b1101100, 0b1100110, 0b1100011]),
+            "A": (7, [0b0011100, 0b0110110, 0b1100011, 0b1111111, 0b1100011, 0b1100011, 0b1100011]),
             "I": (6, [0b111111,  0b001100,  0b001100,  0b001100,  0b001100,  0b001100,  0b111111]),
         ]
     }
@@ -756,8 +816,17 @@ final class Canvas2D {
     func drawTitleLogo(_ text: String, centerX: Int, topY: Int, time: Float) {
         let upper = text.uppercased()
         let uw = LogoFont.unitW, sh = LogoFont.stripeH, gp = LogoFont.gapH
-        let glyphsSeq = upper.map { LogoFont.glyphs[$0] ?? LogoFont.glyphs[" "]! }
-        let totalUnits = glyphsSeq.reduce(0) { $0 + $1.w } + (glyphsSeq.count - 1) * LogoFont.tracking
+        let chars = Array(upper)
+        let glyphsSeq = chars.map { LogoFont.glyphs[$0] ?? LogoFont.glyphs[" "]! }
+        // Per-pair kerning (the tracking AFTER glyph i): tighten the "ST" and the
+        // "A-T-A" clusters, where the T's narrow stem leaves a loose gap.
+        func kern(_ i: Int) -> Int {
+            guard i + 1 < chars.count else { return 0 }
+            let c = chars[i], n = chars[i + 1]
+            if (c == "S" && n == "T") || (c == "A" && n == "T") || (c == "T" && n == "A") { return 0 }
+            return LogoFont.tracking
+        }
+        let totalUnits = (0..<glyphsSeq.count).reduce(0) { $0 + glyphsSeq[$1].w + kern($1) }
         let faceW = totalUnits * uw
         let faceH = LogoFont.glyphHeight
         let pad   = 2                                      // keyline room
@@ -765,24 +834,25 @@ final class Canvas2D {
         let bh = faceH + pad * 2
         let ox = pad, oy = pad                             // face origin in bbox
 
-        // Mask of the glyph faces — each stripe is a `sh`-tall bar, gaps left clear.
+        // Mask of the glyph faces — each stripe is a solid `sh`-tall bar, gaps
+        // between stripes left clear (the venetian-blind look).
         var mask = [Bool](repeating: false, count: bw * bh)
         var penUnit = 0
-        for gl in glyphsSeq {
+        for gi in 0..<glyphsSeq.count {
+            let gl = glyphsSeq[gi]
             for si in 0..<LogoFont.stripes {
                 let bits = gl.s[si]
                 let y0 = oy + si * (sh + gp)
                 for col in 0..<gl.w where bits & (UInt8(1) << (gl.w - 1 - col)) != 0 {
                     let x0 = ox + (penUnit + col) * uw
-                    for yy in 0..<sh { let r = (y0 + yy) * bw; for xx in 0..<uw { mask[r + x0 + xx] = true } }
+                    for yy in 0..<sh {
+                        let r = (y0 + yy) * bw
+                        for xx in 0..<uw { mask[r + x0 + xx] = true }
+                    }
                 }
             }
-            penUnit += gl.w + LogoFont.tracking
+            penUnit += gl.w + kern(gi)
         }
-        @inline(__always) func solid(_ x: Int, _ y: Int) -> Bool {
-            x >= 0 && x < bw && y >= 0 && y < bh && mask[y * bw + x]
-        }
-
         let fb = framebuffer, W = width, H = height
         let bx = centerX - faceW / 2 - ox                  // bbox top-left in fb
         let by = topY - oy
@@ -791,51 +861,11 @@ final class Canvas2D {
             if px >= 0 && px < W && py >= 0 && py < H { fb[py * W + px] = c }
         }
 
-        // Brushed-aluminium ramp: cool blue-grey, light top edge → mid steel →
-        // soft dark band → faint relight → dull base. Muted, low-chroma.
-        let stops: [(Float, Float, Float, Float)] = [
-            (0.00, 222, 227, 234), (0.18, 188, 194, 203), (0.45, 142, 149, 161),
-            (0.50,  92,  98, 111), (0.57, 150, 157, 168), (0.80, 178, 184, 193),
-            (1.00, 112, 118, 130),
-        ]
-        @inline(__always) func ramp(_ t: Float) -> (Float, Float, Float) {
-            var i = 0; while i < stops.count - 1 && t > stops[i + 1].0 { i += 1 }
-            let a = stops[i], b = stops[min(i + 1, stops.count - 1)]
-            let span = max(0.0001, b.0 - a.0), k = min(1, max(0, (t - a.0) / span))
-            return (a.1 + (b.1 - a.1) * k, a.2 + (b.2 - a.2) * k, a.3 + (b.3 - a.3) * k)
-        }
-
-        // Pass 1 — dark keyline around the face (1px, 8-neighbourhood). No 3D
-        // extrude: with the glyphs split into separate stripes, a per-bar extrude
-        // leaves stray dark nubs in the gaps; the keyline + bevel carry the depth.
-        let keyline = packRGBA(14, 16, 22)
+        // Flat cream fill — no gradient, bevel, grain, sheen or shadow.
+        let cream = packRGBA(242, 234, 208)
         for ly in 0..<bh {
-            for lx in 0..<bw where !solid(lx, ly) {
-                if solid(lx-1, ly) || solid(lx+1, ly) || solid(lx, ly-1) || solid(lx, ly+1) ||
-                   solid(lx-1, ly-1) || solid(lx+1, ly-1) || solid(lx-1, ly+1) || solid(lx+1, ly+1) {
-                    put(lx, ly, keyline)
-                }
-            }
-        }
-
-        // Pass 2 — gradient face + soft bevel + brushed grain + dull sheen.
-        let sweep = (time * 0.32).truncatingRemainder(dividingBy: 2.2)  // slow, off-screen pause
-        for ly in 0..<bh {
-            let t = min(1, max(0, Float(ly - oy) / Float(faceH)))
-            let (rr, gg, bb) = ramp(t)
             for lx in 0..<bw where mask[ly * bw + lx] {
-                var r = rr, g = gg, b = bb
-                if !solid(lx, ly - 1) { r = min(255, r*0.6 + 78); g = min(255, g*0.6 + 80); b = min(255, b*0.6 + 84) }   // soft top edge
-                else if !solid(lx, ly + 1) { r *= 0.52; g *= 0.52; b *= 0.56 }                                          // bottom shade (cool)
-                if !solid(lx - 1, ly) { r = min(255, r + 16); g = min(255, g + 16); b = min(255, b + 18) }              // faint left catch
-                // brushed grain: faint vertical streaks (the metal's grain runs along the bars)
-                let grain = Float((lx &* 2654435761) >> 27 & 0x7) - 3.5    // deterministic, ~[-3.5, 3.5]
-                r += grain; g += grain; b += grain
-                // dull anisotropic sheen — broad and low, drifting across the word
-                let diag = (Float(lx) - Float(ly) * 0.5) / Float(faceW)
-                let dist = abs(diag - (sweep - 0.5))
-                if dist < 0.16 { let k = (1 - dist / 0.16) * 0.22; r += (236 - r)*k; g += (239 - g)*k; b += (244 - b)*k }
-                put(lx, ly, packRGBA(UInt8(min(255, max(0, r))), UInt8(min(255, max(0, g))), UInt8(min(255, max(0, b)))))
+                put(lx, ly, cream)
             }
         }
     }

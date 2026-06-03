@@ -139,14 +139,18 @@ Deferred items, not yet scheduled. Pick from here when ready.
       upscale. Green-button full-screen uses the same path.
 
 ## Systems (already flagged as "next" candidates)
-- [x] **Title / start screen** — done. Bespoke metallic STRATARIS wordmark,
-      blinking PRESS ENTER, [B]/[V] menu hints, hi-score line, controls, credit —
-      composited over the live mesh-terrain attract flyover. Now also a **live
-      attract-mode demo**: a non-interactive skirmish over the title world reusing
-      the real EnemyField AI + Combat + effects (a committed one-target gunner
-      lock that only engages on-screen, non-fogged craft; paced kills so craft
-      fly and dogfight; fresh waves warp in). (A dedicated high-score *viewer*
-      screen beyond the title line is still possible future work.)
+- [x] **Title / start screen** — done. Bespoke flat-cream venetian-blind
+      STRATARIS wordmark (aligned crossbars, tucked ST/ATA kerning), with all
+      minor text in the Core Text proportional font, device-aware prompts
+      ("Press Fire/Enter to Start" + "[C] Configure Controller" / "[K] Configure
+      Keyboard"), a per-theme nebula + parallax starfield, CRT scanlines, and a
+      single full-screen contrast scrim. Composited over a **live attract-mode
+      demo**: a non-interactive skirmish over the title world reusing the real
+      EnemyField AI + Combat + effects (a committed one-target gunner lock that
+      only engages on-screen, non-fogged, unoccluded craft; paced kills so craft
+      fly and dogfight; always at least one in view; fresh waves warp in). (A
+      dedicated high-score *viewer* screen beyond the title line is still
+      possible future work.)
 - [ ] Cockpit frame — art surround for the HUD.
 - [x] **Async warp** — done. `beginWarp` generates the next planet
       (`Terrain` + `StructureField` + `EnemyField`) on a background thread and

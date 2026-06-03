@@ -179,6 +179,7 @@ final class Renderer: NSObject, MTKViewDelegate {
     private var demoLockId: Int?                  // committed lock: ONE craft's id, held until destroyed
     private var demoLockBurst: Float = 0          // time we've poured fire into the current lock
     private var demoWaveTimer: Float = 0          // delay between waves once the field thins
+    private var demoEmptyTimer: Float = 0         // time with NOTHING visible → warp in a fresh wave ahead
 
     // Edge/delta tracking for one-shot SFX.
     private var prevKills = 0, prevShots = 0, prevBombs = 0, prevStanding = 0
@@ -959,6 +960,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         demoLockId = nil
         demoLockBurst = 0
         demoWaveTimer = 0
+        demoEmptyTimer = 0
     }
 
     /// Warp in a fresh wave of attackers near the drifting camera (keeps the
@@ -1012,9 +1014,10 @@ final class Renderer: NSObject, MTKViewDelegate {
         return fx
     }
 
-    /// Is craft `i` engageable right now — on screen AND within visible (non-fog)
-    /// range? Returns its view depth (for nearest-pick), or nil if not. We never
-    /// fire at a craft lost in the haze. `maxDist` is the live fog distance.
+    /// Is craft `i` engageable right now — on screen, within visible (non-fog)
+    /// range, AND in clear line of sight (not hidden behind a ridge)? Returns its
+    /// view depth (for nearest-pick), or nil if not. We never fire at a craft
+    /// lost in the haze or occluded by terrain (which looked like shooting hills).
     private func demoEngageable(_ i: Int, cam: Camera6DOF, maxDist: Float) -> Float? {
         guard let de = demoEnemies, de.enemies.indices.contains(i) else { return nil }
         let e = de.enemies[i]
@@ -1023,7 +1026,23 @@ final class Renderer: NSObject, MTKViewDelegate {
         if dx * dx + dy * dy + dz * dz > maxDist * maxDist { return nil }      // fogged out
         guard let p = cam.project(w, width: RenderConfig.width, height: RenderConfig.height) else { return nil }
         if p.x < 0 || p.x >= Float(RenderConfig.width) || p.y < 0 || p.y >= Float(RenderConfig.height) { return nil }
+        if demoOccluded(w) { return nil }                                     // behind a ridge
         return p.depth
+    }
+
+    /// March the camera→craft sightline and test it against the title terrain:
+    /// true if a ridge rises above the line (the craft is hidden behind a hill).
+    private func demoOccluded(_ w: SIMD3<Float>) -> Bool {
+        let cx = titleCam.x, cy = titleCam.y, cz = titleCam.height
+        let steps = 16
+        for s in 1..<steps {
+            let t = Float(s) / Float(steps)
+            let px = cx + (w.x - cx) * t
+            let py = cy + (w.y - cy) * t
+            let pz = cz + (w.z - cz) * t
+            if titleTerrain.heightF(px, py) > pz + 1 { return true }
+        }
+        return false
     }
 
     /// Drive the non-interactive skirmish one frame: enemy AI, auto-fire at the
@@ -1061,6 +1080,18 @@ final class Renderer: NSObject, MTKViewDelegate {
         if let i = idx { demoLockBurst += dt; if demoLockBurst >= 0.8 { killIdx = i } }
         demoCombat.update(dt: dt, input: demoInput, field: de, smoke: ds, lockedTargetIndex: killIdx)
         if let id = demoLockId, de.index(forId: id) == nil { demoLockId = nil; demoLockBurst = 0 }  // killed → next
+
+        // Keep the battle on screen: if nothing is currently visible (the
+        // survivors are orbiting out of frame), warp in a fresh wave ahead after
+        // a short beat so there's always at least one craft in view.
+        var visible = 0
+        for i in de.enemies.indices where demoEngageable(i, cam: cam, maxDist: maxDist) != nil { visible += 1 }
+        if visible == 0 {
+            demoEmptyTimer += dt
+            if demoEmptyTimer >= 0.3 { spawnDemoWave(); demoEmptyTimer = 0; demoWaveTimer = 0 }
+        } else {
+            demoEmptyTimer = 0
+        }
         _ = demoProjectiles.update(dt: dt, playerX: titleCam.x, playerY: titleCam.y, playerZ: titleCam.height, terrain: titleTerrain)
         _ = demoBombs.update(dt: dt, playerX: 1e9, playerY: 1e9, playerZ: 1e9, terrain: titleTerrain)
         ds.update(dt: dt, structures: titleStructures, maxHealth: titleStructures.maxHealth)
@@ -1190,9 +1221,18 @@ final class Renderer: NSObject, MTKViewDelegate {
             }
             if !input.codex { codexLatch = false }
 
+            // Context-aware prompts: point at whichever device is in use.
+            let startHint = gamepad.connected ? "Press Fire to Start" : "Press Enter to Start"
+            let configHint = gamepad.connected ? "[C]  Configure Controller"
+                                               : "[K]  Configure Keyboard"
+            let th = titleTerrain.theme
+            let neb: (CGFloat, CGFloat, CGFloat) = (CGFloat(th.skyTop.0) / 255,
+                                                    CGFloat(th.skyTop.1) / 255,
+                                                    CGFloat(th.skyTop.2) / 255)
             canvas.drawTitleScreen(time: titleTime,
                                   topName: highScores.entries.first?.name,
-                                  topScore: highScores.entries.first?.score ?? 0)
+                                  topScore: highScores.entries.first?.score ?? 0,
+                                  startHint: startHint, configHint: configHint, nebula: neb)
             present(in: view, from: canvas)
             return
         }
