@@ -135,8 +135,13 @@ Deferred items, not yet scheduled. Pick from here when ready.
 ## Systems (already flagged as "next" candidates)
 - [ ] Title / start screen (logo, PRESS ENTER, view high scores from menu).
 - [ ] Cockpit frame — art surround for the HUD.
-- [ ] Async warp — generate the next planet on a background thread WHILE the
-      player keeps flying (that's why flight continues after a level is cleared:
-      no freeze — a seamless warp transition mid-flight rather than a "WARPING…"
-      stall). Jonathan has a specific plan here; revisit with him.
+- [x] **Async warp** — done. `beginWarp` generates the next planet
+      (`Terrain` + `StructureField` + `EnemyField`) on a background thread and
+      stages its GPU vertex patch off-thread (`mesh.stageTerrain`), all while the
+      5-phase warp cut-scene (ascent → orbit → hyperspace → approach → descent)
+      plays with the player kept in-cockpit — no freeze, no "WARPING…" stall.
+      Phase 3 (approach) holds until `warpReady` if generation lags; the staged
+      patch commits instantly at descent entry (`commitStagedTerrain`), so the
+      new world drops in with zero hitch. This *was* Jonathan's plan: wrap the
+      async gen into the planetary-transition cinematic.
 - [ ] Audio — cannons, explosions, shield-down alarm, ambient per planet.

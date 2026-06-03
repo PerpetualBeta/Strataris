@@ -299,6 +299,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         let seed = Renderer.planetSeed(n)
         let t = Terrain(seed: seed, theme: PlanetTheme.forPlanet(n))
         terrain = t
+        audio.setAmbientProfile(AmbientProfile.forTheme(t.theme))   // this world's atmosphere
         structures = StructureField(terrain: t, around: 512, cy: 512, count: 5, seed: seed ^ 0x00AB_CDEF)
         canvas.mapSize = Float(t.size)     // radar wrap; the canvas itself is reused
         enemies = EnemyField(terrain: t, around: 512, cy: 512,
@@ -635,6 +636,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         guard let t = warpTerrain, let str = warpStructures, let en = warpEnemies else { return }
         terrain = t; structures = str; enemies = en      // score (combat) carries over
         canvas.mapSize = Float(t.size)                   // radar wrap for the new world
+        // (Ambience already switched to this world at descent entry, phase 4.)
         camera = Camera.start(over: t)
         mesh.commitStagedTerrain(fallback: t)                         // instant swap (staged during the cut-scene)
         resetCamera6(over: t)
@@ -676,8 +678,12 @@ final class Renderer: NSObject, MTKViewDelegate {
                     warpCam = Camera.start(over: warpTerrain ?? terrain)
                     warpCam.x = 512; warpCam.y = 512; warpCam.angle = 0
                     // The descent flies over the NEW world, so commit the staged
-                    // patch now (finalizeWarp's commit becomes a no-op).
-                    if let nt = warpTerrain { mesh.commitStagedTerrain(fallback: nt) }
+                    // patch now (finalizeWarp's commit becomes a no-op) and switch
+                    // ambience to the new planet — it fades in over the descent.
+                    if let nt = warpTerrain {
+                        mesh.commitStagedTerrain(fallback: nt)
+                        audio.setAmbientProfile(AmbientProfile.forTheme(nt.theme))
+                    }
                 }
                 if warpPhase >= 5 { finalizeWarp(); return }
             }
@@ -687,6 +693,7 @@ final class Renderer: NSObject, MTKViewDelegate {
 
         // Ship ambience: loud rumble in atmosphere (ascent/descent), quiet hum in space.
         audio.engine(on: true, speed: (warpPhase == 0 || warpPhase == 4) ? 260 : 30)
+        (view as? GameView)?.updateCursorIdle(active: true)   // stay hidden through the cut-scene
 
         // Draws the cockpit instrument cluster + radar over the cut-scene, so we
         // stay "in the ship" the whole time (no sudden EVA). The radar scope is
@@ -856,6 +863,14 @@ final class Renderer: NSObject, MTKViewDelegate {
         // Perk notification fades only during play, so one set at warp-out (perks
         // unlock as the warp begins) still shows its full span on the new planet.
         if state == .playing && !paused && perkBannerTimer > 0 { perkBannerTimer -= dt }
+
+        // Per-planet ambience, driven once for every state (the title/briefing/
+        // codex/warp paths all return early below). The bus fades up while on a
+        // planet — including the warp DESCENT, so the new world arrives gently —
+        // and fades down on warp-out, pause, the title and game-over.
+        let ambientActive = !paused && (state == .playing || state == .won
+            || (state == .warping && warpPhase >= 4))
+        audio.updateAmbient(active: ambientActive, dt: dt)
 
         // Smoothed FPS for the optional HUD readout.
         if dt > 0 { fpsSmoothed += (1 / dt - fpsSmoothed) * 0.1 }
@@ -1213,7 +1228,13 @@ final class Renderer: NSObject, MTKViewDelegate {
         }
 
         // Engine hum while flying; resync SFX deltas for next frame.
+        // (Ambience is driven once at the top of draw, for every state.)
         audio.engine(on: flying, speed: camera.speed)
+
+        // Hide the mouse pointer while flying, unless the player is actively
+        // moving it. Visible when paused or a config sheet is open; the warp
+        // cut-scene drives this itself.
+        (view as? GameView)?.updateCursorIdle(active: flying)
         prevKills = combat.kills
         prevShots = projectiles.shots.count
         prevBombs = bombs.shots.count

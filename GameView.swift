@@ -13,6 +13,13 @@ final class GameView: MTKView {
     let input: InputState
     let gamepad: Gamepad
 
+    // While we're in the game loop (flight + cut-scenes) the pointer is hidden —
+    // it only appears while the player is actively moving the mouse. Polled each
+    // frame from the live pointer position (no event/tracking-area plumbing);
+    // `cursorHidden` keeps NSCursor's counted hide/unhide balanced.
+    private var lastMouseLocation: NSPoint = .zero
+    private var cursorHidden = false
+
     init(frame: CGRect, device: MTLDevice, input: InputState, gamepad: Gamepad) {
         self.input = input
         self.gamepad = gamepad
@@ -27,6 +34,28 @@ final class GameView: MTKView {
     required init(coder: NSCoder) { fatalError("not used") }
 
     override var acceptsFirstResponder: Bool { true }
+
+    // MARK: Idle-pointer hiding
+
+    private func showCursor() { if cursorHidden { NSCursor.unhide(); cursorHidden = false } }
+    private func hideCursor() { if !cursorHidden { NSCursor.hide();   cursorHidden = true  } }
+
+    /// Called once per rendered frame by the renderer. While `active` (the game
+    /// loop — flight and cut-scenes), the pointer is hidden unless it moved since
+    /// the last frame; a stationary mouse over the cockpit vanishes immediately.
+    /// Everywhere else (title, menus, pause, game-over) it stays visible, as it
+    /// does whenever the pointer sits outside the view (e.g. over the menu bar).
+    func updateCursorIdle(active: Bool) {
+        guard active, let win = window else { showCursor(); return }
+        let loc = win.mouseLocationOutsideOfEventStream      // live, window coords
+        let moved = abs(loc.x - lastMouseLocation.x) > 0.1 || abs(loc.y - lastMouseLocation.y) > 0.1
+        lastMouseLocation = loc
+        if moved || !bounds.contains(convert(loc, from: nil)) {
+            showCursor()
+        } else {
+            hideCursor()
+        }
+    }
 
     override func keyDown(with event: NSEvent) {
         // While entering a high-score name, route everything through the text

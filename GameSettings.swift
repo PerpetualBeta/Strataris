@@ -13,9 +13,10 @@ final class GameSettings {
     private let d = UserDefaults.standard
 
     private enum Key {
-        static let musicVolume = "musicVolume"
-        static let sfxVolume   = "sfxVolume"
-        static let voiceVolume = "voiceVolume"
+        static let musicVolume   = "musicVolume"
+        static let sfxVolume     = "sfxVolume"
+        static let voiceVolume   = "voiceVolume"
+        static let ambientVolume = "ambientVolume"
         static let invertPitch = "invertPitch"
         static let deadzone    = "deadzone"
         static let fireConfirms = "fireConfirms"
@@ -29,9 +30,10 @@ final class GameSettings {
 
     private init() {
         d.register(defaults: [
-            Key.musicVolume: 0.7,
-            Key.sfxVolume:   0.9,
-            Key.voiceVolume: 0.85,
+            Key.musicVolume:   0.7,
+            Key.sfxVolume:     0.9,
+            Key.voiceVolume:   0.85,
+            Key.ambientVolume: 0.8,
             Key.invertPitch: false,
             Key.deadzone:    0.25,
             Key.fireConfirms: true,
@@ -43,9 +45,10 @@ final class GameSettings {
     }
 
     // Audio — linear gains in 0...1.
-    var musicVolume: Float { get { d.float(forKey: Key.musicVolume) } set { d.set(newValue, forKey: Key.musicVolume) } }
-    var sfxVolume: Float   { get { d.float(forKey: Key.sfxVolume) }   set { d.set(newValue, forKey: Key.sfxVolume) } }
-    var voiceVolume: Float { get { d.float(forKey: Key.voiceVolume) } set { d.set(newValue, forKey: Key.voiceVolume) } }
+    var musicVolume: Float   { get { d.float(forKey: Key.musicVolume) }   set { d.set(newValue, forKey: Key.musicVolume) } }
+    var sfxVolume: Float     { get { d.float(forKey: Key.sfxVolume) }     set { d.set(newValue, forKey: Key.sfxVolume) } }
+    var voiceVolume: Float   { get { d.float(forKey: Key.voiceVolume) }   set { d.set(newValue, forKey: Key.voiceVolume) } }
+    var ambientVolume: Float { get { d.float(forKey: Key.ambientVolume) } set { d.set(newValue, forKey: Key.ambientVolume) } }
 
     // Controls.
     var invertPitch: Bool  { get { d.bool(forKey: Key.invertPitch) }  set { d.set(newValue, forKey: Key.invertPitch) } }

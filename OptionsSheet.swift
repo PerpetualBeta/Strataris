@@ -1,6 +1,7 @@
 // Strataris — options / settings sheet (⌘,).
 //
-// The single place for player preferences: audio volumes (Music / SFX / Voice),
+// The single place for player preferences: audio volumes (Music / SFX / Voice /
+// Ambient),
 // flight controls (invert pitch, stick deadzone), and a Reset High Scores
 // action. Changes apply live and persist via GameSettings. Native AppKit (no
 // SwiftUI) to keep the game's tiny, all-procedural footprint. While open the
@@ -26,6 +27,7 @@ final class OptionsSheet: NSObject {
     private let musicValue = NSTextField(labelWithString: "")
     private let sfxValue = NSTextField(labelWithString: "")
     private let voiceValue = NSTextField(labelWithString: "")
+    private let ambientValue = NSTextField(labelWithString: "")
 
     static func present(over window: NSWindow, audio: AudioEngine, gamepad: Gamepad, highScores: HighScores) {
         guard current == nil else { return }
@@ -44,7 +46,7 @@ final class OptionsSheet: NSObject {
         self.gamepad = gamepad
         self.highScores = highScores
         self.parent = parent
-        sheet = SheetWindow(contentRect: NSRect(x: 0, y: 0, width: 420, height: 580),
+        sheet = SheetWindow(contentRect: NSRect(x: 0, y: 0, width: 420, height: 614),
                             styleMask: [.titled], backing: .buffered, defer: false)
         super.init()
         sheet.onCancel = { [weak self] in self?.done() }
@@ -64,6 +66,7 @@ final class OptionsSheet: NSObject {
         let music = volumeRow("Music", value: audio.musicGain, label: musicValue, action: #selector(musicChanged(_:)))
         let sfx   = volumeRow("Sound", value: audio.sfxGain, label: sfxValue, action: #selector(sfxChanged(_:)))
         let voice = volumeRow("Voice", value: audio.voiceGain, label: voiceValue, action: #selector(voiceChanged(_:)))
+        let ambient = volumeRow("Ambient", value: audio.ambientGain, label: ambientValue, action: #selector(ambientChanged(_:)))
         updateValueLabels()
 
         // ── Controls ──
@@ -111,7 +114,7 @@ final class OptionsSheet: NSObject {
         done.bezelStyle = .rounded
 
         let stack = NSStackView(views: [title,
-                                        audioHdr, music, sfx, voice,
+                                        audioHdr, music, sfx, voice, ambient,
                                         separator(), controlsHdr, invert, dzRow, ctrlHint,
                                         separator(), trimHdr, agility, yawT, levelT, trimHint,
                                         separator(), dataHdr, reset,
@@ -191,6 +194,7 @@ final class OptionsSheet: NSObject {
         musicValue.stringValue = "\(Int(audio.musicGain * 100))%"
         sfxValue.stringValue = "\(Int(audio.sfxGain * 100))%"
         voiceValue.stringValue = "\(Int(audio.voiceGain * 100))%"
+        ambientValue.stringValue = "\(Int(audio.ambientGain * 100))%"
     }
 
     // MARK: - Actions (apply live + persist)
@@ -204,6 +208,9 @@ final class OptionsSheet: NSObject {
     }
     @objc private func voiceChanged(_ s: NSSlider) {
         audio.voiceGain = Float(s.doubleValue); GameSettings.shared.voiceVolume = audio.voiceGain; updateValueLabels()
+    }
+    @objc private func ambientChanged(_ s: NSSlider) {
+        audio.ambientGain = Float(s.doubleValue); GameSettings.shared.ambientVolume = audio.ambientGain; updateValueLabels()
     }
     @objc private func invertToggled(_ s: NSButton) { gamepad.invertPitch = (s.state == .on) }
     @objc private func deadzoneChanged(_ s: NSSlider) { gamepad.deadzone = Float(s.doubleValue) }

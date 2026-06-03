@@ -14,6 +14,13 @@ final class AudioEngine {
     // Waveforms.
     static let sine = 0, square = 1, triangle = 2, saw = 3, noise = 4, rumble = 5
 
+    // Voice 0 = engine hum; voices 1–2 = the sustained per-planet ambient bed;
+    // one-shot SFX draw from voice `sfxVoice0` upward.
+    static let ambientVoice0 = 1, ambientVoiceCount = 2, sfxVoice0 = 3
+
+    // Mixer buses — each scaled by its own category gain in the render callback.
+    static let busSFX = 0, busMusic = 1, busAmbient = 2
+
     private let engine = AVAudioEngine()
     private var srcNode: AVAudioSourceNode!
     private let sr: Float = 44_100
@@ -25,6 +32,7 @@ final class AudioEngine {
     var musicGain: Float = 1
     var sfxGain: Float = 1
     var voiceGain: Float = 1
+    var ambientGain: Float = 1
 
     private struct Voice {
         var active = false
@@ -38,11 +46,22 @@ final class AudioEngine {
         var delay = 0              // silent lead-in (lets us sequence jingles)
         var amp: Float = 0
         var wave = 0
-        var music = false          // true → scaled by musicGain, else sfxGain
+        var bus = 0                // mixer bus: busSFX / busMusic / busAmbient
         var rng: UInt32 = 0x1234_5678
         var lp: Float = 0          // low-pass state (for the rocket rumble)
+        var cutoff: Float = 0.06   // rumble low-pass coefficient (higher = brighter/windier)
     }
     private var voices = [Voice](repeating: Voice(), count: 24)
+
+    // Per-planet ambience: a sustained bed (voices 1–2) plus sparse one-shot
+    // events scheduled on the game thread. `ambientName` tracks which profile's
+    // bed is currently configured, so we only rebuild the bed voices (a click)
+    // when the planet actually changes — not every frame.
+    private var ambientProfile: AmbientProfile?
+    private var ambientName = ""
+    private var ambientEventCountdown: Float = 0
+    private var ambientFade: Float = 0                    // 0…1 master fade for the ambient bus
+    private static let ambientFadeRate: Float = 1.0 / 1.2 // full cross-fade ≈ 1.2 s
 
     // Voice-clip playback (band-limited, crackly radio voice).
     private var voiceSamples: [Float] = []
@@ -64,6 +83,7 @@ final class AudioEngine {
         musicGain = s.musicVolume
         sfxGain = s.sfxVolume
         voiceGain = s.voiceVolume
+        ambientGain = s.ambientVolume
 
         let fmt = AVAudioFormat(standardFormatWithSampleRate: Double(sr), channels: 1)!
         srcNode = AVAudioSourceNode { [weak self] _, _, frameCount, abl in
@@ -101,7 +121,9 @@ final class AudioEngine {
                         ? Float(elapsed) / Float(max(1, voice.attack))
                         : Float(voice.samplesLeft) / Float(max(1, voice.total - voice.attack))
                 }
-                out[i] += osc(&voice) * voice.amp * env * (voice.music ? musicGain : sfxGain)
+                let busGain = voice.bus == AudioEngine.busMusic ? musicGain
+                            : voice.bus == AudioEngine.busAmbient ? ambientGain * ambientFade : sfxGain
+                out[i] += osc(&voice) * voice.amp * env * busGain
                 voice.phase += voice.freq / sr
                 if voice.phase >= 1 { voice.phase -= 1 }
                 voice.freq *= voice.slide
@@ -147,11 +169,12 @@ final class AudioEngine {
             v.rng = v.rng &* 1_664_525 &+ 1_013_904_223
             return Float(v.rng >> 9) / Float(1 << 23) - 1
         case AudioEngine.rumble:
-            // Low-pass-filtered white noise → a deep rocket-engine rumble.
+            // Low-pass-filtered white noise → a deep rocket rumble at a low
+            // cutoff, an airy wind hiss at a higher one (per-voice `cutoff`).
             v.rng = v.rng &* 1_664_525 &+ 1_013_904_223
             let white = Float(v.rng >> 9) / Float(1 << 23) - 1
-            v.lp += (white - v.lp) * 0.06          // low cutoff
-            return v.lp * 3.0                       // compensate for filter attenuation
+            v.lp += (white - v.lp) * v.cutoff
+            return v.lp * (0.73 / sqrtf(v.cutoff))  // makeup gain ≈ constant across cutoffs
         default:                   return sinf(2 * .pi * v.phase)   // sine
         }
     }
@@ -159,20 +182,23 @@ final class AudioEngine {
     // MARK: Triggering (game thread)
 
     func trigger(wave: Int, f0: Float, f1: Float, dur: Float, amp: Float,
-                 attack: Float = 0.003, delay: Float = 0, music: Bool = false) {
+                 attack: Float = 0.003, delay: Float = 0, music: Bool = false,
+                 ambient: Bool = false, cutoff: Float = 0.06) {
         let total = max(1, Int(dur * sr))
         let slide = (f0 > 0 && f1 > 0) ? powf(f1 / f0, 1 / Float(total)) : 1
+        let bus = music ? AudioEngine.busMusic : (ambient ? AudioEngine.busAmbient : AudioEngine.busSFX)
         os_unfair_lock_lock(lock)
         var idx = -1, oldest = Int.max
-        for v in 1..<voices.count {           // voice 0 reserved for the engine hum
+        for v in AudioEngine.sfxVoice0..<voices.count {   // voices 0–2 reserved (engine hum + ambient bed)
             if !voices[v].active { idx = v; break }
             if voices[v].samplesLeft < oldest { oldest = voices[v].samplesLeft; idx = v }
         }
         if idx >= 0 {
             voices[idx] = Voice(active: true, sustained: false, phase: 0, freq: f0, slide: slide,
                                 samplesLeft: total, total: total, attack: Int(attack * sr),
-                                delay: Int(delay * sr), amp: amp, wave: wave, music: music,
-                                rng: UInt32(truncatingIfNeeded: 0x9E37 &+ idx &* 2654435))
+                                delay: Int(delay * sr), amp: amp, wave: wave, bus: bus,
+                                rng: UInt32(truncatingIfNeeded: 0x9E37 &+ idx &* 2654435),
+                                cutoff: cutoff)
         }
         os_unfair_lock_unlock(lock)
     }
@@ -188,6 +214,74 @@ final class AudioEngine {
             voices[0].active = false; voices[0].sustained = false
         }
         os_unfair_lock_unlock(lock)
+    }
+
+    // MARK: Per-planet ambience
+
+    /// Select the ambient profile for the current world (call on planet load,
+    /// and at warp-descent entry so the new world fades in). Seeds the first
+    /// event countdown; the bed's loudness is governed by the master fade.
+    func setAmbientProfile(_ p: AmbientProfile) {
+        ambientProfile = p
+        ambientEventCountdown = Float.random(in: p.eventRange)
+    }
+
+    /// Stop and forget the ambience (snap to silence; call on a hard reset).
+    func clearAmbient() {
+        os_unfair_lock_lock(lock)
+        for i in 0..<AudioEngine.ambientVoiceCount { voices[AudioEngine.ambientVoice0 + i].active = false }
+        os_unfair_lock_unlock(lock)
+        ambientProfile = nil; ambientName = ""; ambientFade = 0
+    }
+
+    /// Per-frame ambient driver (game thread; call for EVERY state). `active` is
+    /// the target presence: the bus ramps toward full while active (on a planet,
+    /// or descending on arrival) and toward silence otherwise (warp-out, title,
+    /// pause) — so leaving and arriving cross-fade rather than snap. The fade is
+    /// applied to the ambient bus in `render`; sparse events fire only once the
+    /// bed is audibly present. The bed voices are reconfigured (a click) only on
+    /// a genuine planet change, and released when fully faded out.
+    func updateAmbient(active: Bool, dt: Float) {
+        let target: Float = active ? 1 : 0
+        if ambientFade < target {
+            ambientFade = min(target, ambientFade + dt * AudioEngine.ambientFadeRate)
+        } else if ambientFade > target {
+            ambientFade = max(target, ambientFade - dt * AudioEngine.ambientFadeRate)
+        }
+
+        guard let p = ambientProfile else { return }
+
+        os_unfair_lock_lock(lock)
+        if ambientFade > 0 {
+            let rebuild = ambientName != p.name
+            ambientName = p.name
+            for slot in 0..<AudioEngine.ambientVoiceCount {
+                let i = AudioEngine.ambientVoice0 + slot
+                if slot < p.beds.count {
+                    let b = p.beds[slot]
+                    if rebuild {
+                        voices[i].wave = b.wave; voices[i].freq = b.freq; voices[i].slide = 1
+                        voices[i].amp = b.amp; voices[i].cutoff = b.cutoff; voices[i].phase = 0
+                        voices[i].sustained = true; voices[i].bus = AudioEngine.busAmbient
+                    }
+                    voices[i].active = true; voices[i].sustained = true
+                } else {
+                    voices[i].active = false
+                }
+            }
+        } else {
+            for i in 0..<AudioEngine.ambientVoiceCount { voices[AudioEngine.ambientVoice0 + i].active = false }
+        }
+        os_unfair_lock_unlock(lock)
+
+        // Sparse events only once the bed is meaningfully present.
+        if active && ambientFade > 0.5 {
+            ambientEventCountdown -= dt
+            if ambientEventCountdown <= 0 {
+                p.fire(self)
+                ambientEventCountdown = Float.random(in: p.eventRange)
+            }
+        }
     }
 
     // MARK: SFX presets
@@ -250,5 +344,141 @@ final class AudioEngine {
     func rogerBleep() {                                     // rapid double-beep
         trigger(wave: AudioEngine.square, f0: 1500, f1: 1500, dur: 0.06, amp: 0.13, attack: 0.003)
         trigger(wave: AudioEngine.square, f0: 1500, f1: 1500, dur: 0.06, amp: 0.13, attack: 0.003, delay: 0.09)
+    }
+}
+
+// MARK: - Per-planet ambience
+
+/// The atmospheric "voice" of a world: one or two sustained bed layers (a wind
+/// hiss and/or a tonal drone) plus a closure that fires sparse one-shot events
+/// (gusts, gurgles, crackles, shimmers). All synthesised — no asset files —
+/// keyed off `PlanetTheme` so each colony in the cluster *sounds* like itself,
+/// not just looks like itself. Amplitudes sit deliberately under the engine
+/// hum (~0.20) so the bed is felt more than heard; the events give it life.
+struct AmbientProfile {
+    struct Bed { let wave: Int; let freq: Float; let amp: Float; let cutoff: Float }
+
+    let name: String                      // matches PlanetTheme.name (bed-rebuild key)
+    let beds: [Bed]                       // 1–2 sustained layers (voices 1–2)
+    let eventRange: ClosedRange<Float>    // seconds between one-shot events
+    let fire: (AudioEngine) -> Void       // trigger the next atmospheric event
+
+    /// A filtered-noise bed layer (wind/rumble): low cutoff = deep, high = airy.
+    static func wind(_ amp: Float, cutoff: Float) -> Bed {
+        Bed(wave: AudioEngine.rumble, freq: 1, amp: amp, cutoff: cutoff)
+    }
+    /// A tonal bed layer (a low drone or a soft pad note).
+    static func drone(_ wave: Int, _ freq: Float, _ amp: Float) -> Bed {
+        Bed(wave: wave, freq: freq, amp: amp, cutoff: 0.06)
+    }
+
+    /// The ambience for the world at this theme. Falls back to a neutral breeze.
+    static func forTheme(_ theme: PlanetTheme) -> AmbientProfile {
+        switch theme.name {
+
+        // Demeter — temperate earthlike: a gentle, airy breeze with soft gusts.
+        case "Demeter":
+            return AmbientProfile(name: theme.name,
+                beds: [wind(0.09, cutoff: 0.18)],
+                eventRange: 4...9) { a in
+                    a.trigger(wave: AudioEngine.rumble, f0: 1, f1: 1,
+                              dur: Float.random(in: 1.2...2.0), amp: Float.random(in: 0.09...0.15),
+                              attack: 0.7, ambient: true, cutoff: Float.random(in: 0.14...0.22))
+                }
+
+        // Tantalus — rust desert: a drier, lower wind over a hollow moan.
+        case "Tantalus":
+            return AmbientProfile(name: theme.name,
+                beds: [wind(0.08, cutoff: 0.12), drone(AudioEngine.sine, 42, 0.05)],
+                eventRange: 5...11) { a in
+                    if Bool.random() {                       // a dust-laden gust
+                        a.trigger(wave: AudioEngine.rumble, f0: 1, f1: 1,
+                                  dur: Float.random(in: 1.4...2.2), amp: Float.random(in: 0.09...0.14),
+                                  attack: 0.8, ambient: true, cutoff: Float.random(in: 0.09...0.13))
+                    } else {                                 // a distant hollow moan
+                        let f = Float.random(in: 80...100)
+                        a.trigger(wave: AudioEngine.sine, f0: f, f1: f * 0.8,
+                                  dur: 1.9, amp: 0.09, attack: 0.6, ambient: true)
+                    }
+                }
+
+        // Boreas — ice world: a thin, high, cold wind that whistles; ice creaks.
+        case "Boreas":
+            return AmbientProfile(name: theme.name,
+                beds: [wind(0.09, cutoff: 0.30), drone(AudioEngine.sine, 520, 0.02)],
+                eventRange: 4...8) { a in
+                    if Bool.random() {                       // wind whistle (rise + fall)
+                        let f = Float.random(in: 850...1100)
+                        a.trigger(wave: AudioEngine.sine, f0: f, f1: f * 1.6,
+                                  dur: 1.1, amp: 0.08, attack: 0.45, ambient: true)
+                    } else {                                 // an ice creak
+                        let f = Float.random(in: 180...260)
+                        a.trigger(wave: AudioEngine.square, f0: f, f1: f * 0.8,
+                                  dur: 0.28, amp: 0.09, attack: 0.04, ambient: true)
+                    }
+                }
+
+        // Pandora — toxic: a murky deep bed with a queasy drone; bubbling gurgles.
+        case "Pandora":
+            return AmbientProfile(name: theme.name,
+                beds: [wind(0.10, cutoff: 0.08), drone(AudioEngine.triangle, 59, 0.05)],
+                eventRange: 3...7) { a in
+                    if Int.random(in: 0...2) > 0 {           // a bubbling gurgle
+                        let n = Int.random(in: 2...4)
+                        for i in 0..<n {
+                            let f = Float.random(in: 180...320)
+                            a.trigger(wave: AudioEngine.sine, f0: f, f1: f * 0.5,
+                                      dur: 0.13, amp: Float.random(in: 0.07...0.12),
+                                      attack: 0.02, delay: Float(i) * Float.random(in: 0.07...0.13),
+                                      ambient: true)
+                        }
+                    } else {                                 // a venting toxic hiss
+                        a.trigger(wave: AudioEngine.rumble, f0: 1, f1: 1,
+                                  dur: 0.9, amp: 0.09, attack: 0.35, ambient: true, cutoff: 0.26)
+                    }
+                }
+
+        // Vulcan — volcanic: a deep ground rumble + sub drone; lava crackle & booms.
+        case "Vulcan":
+            return AmbientProfile(name: theme.name,
+                beds: [wind(0.15, cutoff: 0.05), drone(AudioEngine.sine, 36, 0.05)],
+                eventRange: 2.5...6) { a in
+                    if Bool.random() {                       // a burst of lava crackle
+                        let n = Int.random(in: 3...6)
+                        for i in 0..<n {
+                            a.trigger(wave: AudioEngine.noise, f0: 1, f1: 1,
+                                      dur: Float.random(in: 0.04...0.09), amp: Float.random(in: 0.07...0.15),
+                                      delay: Float(i) * Float.random(in: 0.03...0.10), ambient: true)
+                        }
+                    } else {                                 // a distant deep boom
+                        a.trigger(wave: AudioEngine.sine, f0: 72, f1: 24, dur: 0.9, amp: 0.16, attack: 0.02, ambient: true)
+                        a.trigger(wave: AudioEngine.noise, f0: 1, f1: 1, dur: 0.5, amp: 0.10, attack: 0.02, ambient: true)
+                    }
+                }
+
+        // Vesper — violet twilight: a soft open-fifth pad, airy; eerie shimmers.
+        case "Vesper":
+            return AmbientProfile(name: theme.name,
+                beds: [drone(AudioEngine.triangle, 131, 0.05), drone(AudioEngine.triangle, 196, 0.038)],
+                eventRange: 5...10) { a in
+                    if Bool.random() {                       // a high eerie shimmer
+                        let f = Float.random(in: 980...1160)
+                        a.trigger(wave: AudioEngine.triangle, f0: f, f1: f * 1.05,
+                                  dur: 1.6, amp: 0.045, attack: 0.8, ambient: true)
+                    } else {                                 // a soft distant chime
+                        let f = Float.random(in: 700...920)
+                        a.trigger(wave: AudioEngine.sine, f0: f, f1: f, dur: 0.6, amp: 0.05, attack: 0.05, ambient: true)
+                    }
+                }
+
+        // Any future world: a neutral breeze.
+        default:
+            return AmbientProfile(name: theme.name,
+                beds: [wind(0.09, cutoff: 0.16)],
+                eventRange: 5...10) { a in
+                    a.trigger(wave: AudioEngine.rumble, f0: 1, f1: 1,
+                              dur: 1.5, amp: 0.10, attack: 0.7, ambient: true, cutoff: 0.16)
+                }
+        }
     }
 }
