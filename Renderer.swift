@@ -325,63 +325,175 @@ final class Renderer: NSObject, MTKViewDelegate {
 
     private static func midi(_ n: Int) -> Float { 440 * powf(2, Float(n - 69) / 12) }
 
-    /// An original, dark, foreboding title theme (NOT a copyrighted tune):
-    /// a slow D-minor piece that DEVELOPS over 64 steps — an ominous intro and
-    /// brooding A theme, a rising chromatic bridge with double-time war-drums,
-    /// then a climactic B statement an octave up with a dissonant high cluster,
-    /// before resolving back. Deep moving bass + minor chords throughout.
+    // MARK: Title theme (orchestral-synth voices)
+
+    /// A string-ensemble note: detuned saw stack for a chorused, sustained body.
+    private func strings(_ note: Int, dur: Float, amp: Float, attack: Float) {
+        let f = Renderer.midi(note)
+        audio.trigger(wave: AudioEngine.saw, f0: f, f1: f, dur: dur, amp: amp, attack: attack, music: true)
+        audio.trigger(wave: AudioEngine.saw, f0: f * 1.004, f1: f * 1.004, dur: dur,
+                      amp: amp * 0.7, attack: attack, music: true)
+    }
+
+    /// An overdriven electric-guitar lead note — a REAL plucked string
+    /// (Karplus-Strong physical model in the audio engine), not stacked
+    /// oscillators: a noise-excited resonating delay line with the natural body
+    /// and decay of a struck string, overdriven for an electric tone. A second
+    /// slightly-detuned string thickens it (a chorus / doubled-track feel).
+    private func guitar(_ note: Int, amp: Float) {
+        let f = Renderer.midi(note)
+        audio.pluckString(freq: f, dur: 1.5, amp: amp, decay: 0.99, drive: 6)
+        audio.pluckString(freq: f * 1.003, dur: 1.5, amp: amp * 0.5, decay: 0.99, drive: 6)
+    }
+
+    /// A sustained voice doubling the lead melody — detuned saws with a gentle
+    /// swell and a long, even fade, lightly overdriven for warmth. The plucked
+    /// `guitar` notes have no sustain of their own (they sound isolated); this
+    /// holds underneath and overlaps into the gaps so the melody line sings
+    /// continuously, the pluck riding on top for attack and definition.
+    private func leadPad(_ note: Int, amp: Float) {
+        let f = Renderer.midi(note)
+        audio.trigger(wave: AudioEngine.saw, f0: f, f1: f, dur: 2.5, amp: amp,
+                      attack: 0.06, music: true, drive: 2)
+        audio.trigger(wave: AudioEngine.saw, f0: f * 1.004, f1: f * 1.004, dur: 2.5,
+                      amp: amp * 0.7, attack: 0.06, music: true, drive: 2)
+    }
+
+    /// A timpani hit: noise transient + a fast low pitch-drop.
+    private func timpani(_ amp: Float) {
+        audio.trigger(wave: AudioEngine.noise, f0: 1, f1: 1, dur: 0.20, amp: amp * 0.8, music: true)
+        audio.trigger(wave: AudioEngine.sine, f0: 70, f1: 30, dur: 0.30, amp: amp, music: true)
+    }
+
+    /// A punchy low bass note: saw for bite + triangle for weight.
+    private func bass(_ note: Int, dur: Float, amp: Float) {
+        let f = Renderer.midi(note)
+        audio.trigger(wave: AudioEngine.saw, f0: f, f1: f, dur: dur, amp: amp, attack: 0.008, music: true)
+        audio.trigger(wave: AudioEngine.triangle, f0: f, f1: f, dur: dur, amp: amp * 0.8, attack: 0.008, music: true)
+    }
+
+    /// An original, dark "epic" title theme (NOT a copyrighted tune — composed in
+    /// the *style* of cinematic trailer music): A-minor with harmonic-minor /
+    /// Dorian inflections (G♯ leading tone, F♯ colour) for menace. It's a ~168 s
+    /// LONG-FORM BUILD over 56 bars / 14 sections that ESCALATES to a frenetic
+    /// peak (sec 11) — mirroring the game (calm and simple at first, intense and
+    /// frantic as the levels climb) — then WINDS DOWN over two sections so the
+    /// loop eases back to the quiet intro instead of cliff-edging. Layers stack
+    /// in: drone+timpani → string pads → rhythmic bass → sixteenth ostinato →
+    /// electric-guitar lead → dissonant high cluster, bass and drums going
+    /// double-time into the climax, then re-thinning on the wind-down. Density is
+    /// driven by `dsec` (which retreats on the wind-down) while loudness tapers
+    /// separately. Progression Am–F–C–G (i–♭VI–♭III–♭VII); E major (V) injected
+    /// near the top for the G♯ leading-tone tension.
     ///
-    /// Sequenced from `musicTimer` (not the render loop) so it keeps playing
-    /// while AppKit's event tracking stalls MTKView's frame timer.
+    /// Sequenced from the background music timer (not the render loop) so it
+    /// keeps playing while AppKit's event tracking stalls MTKView's frame timer.
     private func titleMusic() {
-        let step = Int(musicClock / 0.19)       // slow + grave
+        let step = Int(musicClock / 0.1875)     // 16th-note grid at ~80 BPM
         guard step != lastTitleBeat else { return }
         lastTitleBeat = step
-        let s = step % 64
-        let bar = s / 8
-        let climax = s >= 32                    // bridge + B section: more intensity
+        let LEN = 896                           // 56 bars × 16 → ~168 s loop
+        let s = step % LEN
+        let bar = s / 16                        // 0…55
+        let sec = bar / 4                       // 0…13 (0–11 build, 12–13 wind-down)
+        let pos = s % 16                        // 16th within the bar
+        let beat = pos / 4                      // 0…3
+        let sub = pos % 4                       // 0…3
 
-        // Timpani — heavy and low; double-time through the climax for drive.
-        if (climax && s % 2 == 0) || (!climax && s % 4 == 0) {
-            audio.trigger(wave: AudioEngine.noise, f0: 1, f1: 1, dur: 0.22, amp: 0.20, music: true)
-            audio.trigger(wave: AudioEngine.sine, f0: 56, f1: 26, dur: 0.28, amp: 0.24, music: true)
+        // Loudness climbs to a frenetic peak (sec 11, past 1.0 → the tanh limiter
+        // grits it), then tapers over the two wind-down sections back toward the
+        // intro level — no cliff at the loop.
+        let intensity: [Float] = [0.30, 0.40, 0.50, 0.60, 0.68, 0.75, 0.82, 0.88,
+                                  0.93, 0.97, 1.0, 1.06, 0.72, 0.45]
+        let I = intensity[sec]
+
+        // Arrangement DENSITY section: the build climbs 0…11, then the wind-down
+        // sections retreat to mid- and early-build densities so the texture
+        // unwinds (fewer drums, sparser bass, lead bows out) as it loops home.
+        let dsec = sec <= 11 ? sec : (sec == 12 ? 6 : 3)
+
+        // One chord per bar: Am – F – C – G, with E major swapped in for the
+        // final bar of the top sections (V, raising the G♯ leading tone).
+        let ci = bar % 4
+        let useE = dsec >= 9 && ci == 3
+        let roots  = [45, 41, 36, 43]                                   // A2 F2 C2 G2
+        let triads = [[57, 60, 64], [53, 57, 60], [55, 60, 64], [55, 59, 62]]  // Am F C G
+        let root = useE ? 40 : roots[ci]                                // E2
+        let chord = useE ? [56, 60, 64] : triads[ci]                    // E G♯ B
+
+        // --- Low drone + sub (always) ---
+        if pos == 0 {
+            strings(root, dur: 2.9, amp: 0.15 * I, attack: 0.08)
+            audio.trigger(wave: AudioEngine.triangle, f0: Renderer.midi(root - 12),
+                          f1: Renderer.midi(root - 12), dur: 2.9, amp: 0.10 * I, attack: 0.1, music: true)
         }
-        // Deep bass root + minor chord per bar (Dm – Bb – Gm – A, twice).
-        if s % 8 == 0 {
-            let roots = [38, 34, 31, 33, 38, 34, 31, 33]                  // D2 Bb1 G1 A1 ×2
-            audio.trigger(wave: AudioEngine.saw, f0: Renderer.midi(roots[bar]),
-                          f1: Renderer.midi(roots[bar]), dur: 1.5, amp: 0.14, attack: 0.03, music: true)
-            let dm: [Int] = [50, 53, 57], bb = [46, 50, 53], gm = [43, 46, 50], a = [45, 49, 52]
-            let chords = [dm, bb, gm, a, dm, bb, gm, a]
-            for n in chords[bar] {
-                audio.trigger(wave: AudioEngine.triangle, f0: Renderer.midi(n), f1: Renderer.midi(n),
-                              dur: 1.6, amp: 0.05, attack: 0.06, music: true)
+        // --- String pad chord (from section 1) ---
+        if dsec >= 1 && pos == 0 {
+            for n in chord { strings(n, dur: 2.7, amp: 0.045 * I, attack: 0.25) }
+        }
+        // --- Dissonant high cluster near the top (dread) ---
+        if dsec >= 9 && pos == 0 {
+            audio.trigger(wave: AudioEngine.triangle, f0: Renderer.midi(81), f1: Renderer.midi(81),
+                          dur: 2.6, amp: 0.03 * I, attack: 0.4, music: true)
+            audio.trigger(wave: AudioEngine.triangle, f0: Renderer.midi(80), f1: Renderer.midi(80),
+                          dur: 2.6, amp: 0.026 * I, attack: 0.4, music: true)   // G♯ clash
+        }
+
+        // --- Rhythmic bass (from section 2): half-notes → eighths → sixteenths ---
+        if dsec >= 2 {
+            let bassHit: Bool, bnote: Int, bdur: Float
+            if dsec <= 5 {                                  // sparse: beats 1 & 3
+                bassHit = (beat % 2 == 0 && sub == 0); bnote = root; bdur = 0.4
+            } else if dsec <= 9 {                           // driving eighths, octave bounce
+                bassHit = (sub == 0 || sub == 2); bnote = (sub == 0 ? root : root + 12); bdur = 0.17
+            } else {                                        // frenetic sixteenths
+                bassHit = true; bnote = (sub % 2 == 0 ? root : root + 12); bdur = 0.11
             }
-            // Dissonant high cluster swells in during the climax (dread/tension).
-            if climax {
-                audio.trigger(wave: AudioEngine.triangle, f0: Renderer.midi(81), f1: Renderer.midi(81),
-                              dur: 1.6, amp: 0.035, attack: 0.2, music: true)
-                audio.trigger(wave: AudioEngine.triangle, f0: Renderer.midi(82), f1: Renderer.midi(82),
-                              dur: 1.6, amp: 0.030, attack: 0.2, music: true)   // semitone clash
+            if bassHit { bass(bnote, dur: bdur, amp: 0.11 * I) }
+        }
+
+        // --- Ostinato pulse (from section 3): root+fifth plucks; sixteenths once big ---
+        if dsec >= 3 {
+            let sixteenths = dsec >= 6
+            if sixteenths || sub == 0 {
+                let r = root + 12
+                audio.trigger(wave: AudioEngine.saw, f0: Renderer.midi(r), f1: Renderer.midi(r),
+                              dur: 0.16, amp: 0.06 * I, attack: 0.005, music: true)
+                if sixteenths || beat % 2 == 1 {
+                    let fifth = root + 19
+                    audio.trigger(wave: AudioEngine.triangle, f0: Renderer.midi(fifth), f1: Renderer.midi(fifth),
+                                  dur: 0.14, amp: 0.038 * I, attack: 0.005, music: true)
+                }
             }
         }
-        // Melody: intro (rest) → A theme → chromatic bridge → B climax (8va).
-        // Harmonic-minor leading tones (C#=61 / 73) add menace.
-        let mel = [ 0,  0,  0,  0,   0,  0,  0,  0,    // intro
-                   62,  0,  0, 64,  65,  0, 64, 62,    // A
-                   69,  0,  0, 67,  65,  0, 64, 62,    // A
-                   62, 64, 65, 67,  69, 70, 69,  0,    // bridge — chromatic climb
-                   74,  0,  0, 76,  77,  0, 76, 74,    // B (octave up)
-                   81,  0,  0, 79,  77,  0, 76, 74,    // B
-                   73,  0, 74,  0,  77, 76, 74,  0,    // B → resolve
-                    0,  0,  0,  0,   0,  0,  0,  0]     // breath before the loop
-        let m = mel[s]
-        if m > 0 {
-            let f = Renderer.midi(m)
-            audio.trigger(wave: AudioEngine.saw, f0: f, f1: f, dur: 0.30, amp: 0.16, attack: 0.02, music: true)
-            audio.trigger(wave: AudioEngine.saw, f0: f * 0.5, f1: f * 0.5, dur: 0.32, amp: 0.12, attack: 0.03, music: true)
-            if climax {   // add a brighter octave on top for power
-                audio.trigger(wave: AudioEngine.saw, f0: f * 2, f1: f * 2, dur: 0.26, amp: 0.06, attack: 0.02, music: true)
+
+        // --- Timpani: downbeat → 1&3 → every beat → eighths → 16th fills at the peak ---
+        let timpHit: Bool
+        switch dsec {
+        case 0, 1:          timpHit = (pos == 0)
+        case 2, 3, 4, 5:    timpHit = (beat % 2 == 0 && sub == 0)
+        case 6, 7, 8, 9:    timpHit = (sub == 0)                       // every beat
+        case 10:            timpHit = (sub == 0 || sub == 2)           // driving eighths
+        default:            timpHit = (sub == 0 || sub == 2) || beat == 3   // peak: 16th fill on beat 4
+        }
+        if timpHit { timpani(0.22 * I) }
+
+        // --- Original electric-guitar lead (from section 4); octave up + fifth harmony at the top ---
+        if dsec >= 4 {
+            // A 4-bar original motif on the 16th grid (A natural/harmonic minor).
+            let mel = [
+                76, 0, 0,  0,  79, 0, 0,  0,  81, 0, 0, 0,  80, 0, 0, 0,   // E G A  G♯
+                81, 0, 0, 76,  77, 0, 76, 0,  74, 0, 0, 0,   0, 0, 0, 0,   // A E F E D
+                72, 0, 0, 74,  76, 0, 0, 77,  79, 0, 0, 0,  80, 0, 0, 0,   // C D E F G G♯
+                81, 0, 0,  0,   0, 0, 79, 0,  76, 0, 0, 0,   0, 0, 0, 0,   // A G E
+            ]
+            let m = mel[ci * 16 + pos]
+            if m > 0 {
+                // An octave down into the meatier C4–A4 range — fuller, and it
+                // cuts through the dense climax instead of thinning out up top.
+                guitar(m - 12, amp: 0.20 * I)
+                leadPad(m - 12, amp: 0.09 * I)                        // sustained voice underneath
+                if dsec >= 10 { guitar(m - 12 + 7, amp: 0.09 * I) }   // power-fifth at the peak
             }
         }
     }

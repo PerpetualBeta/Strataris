@@ -11,8 +11,9 @@ import AVFoundation
 import os
 
 final class AudioEngine {
-    // Waveforms.
-    static let sine = 0, square = 1, triangle = 2, saw = 3, noise = 4, rumble = 5
+    // Waveforms. `string` is a Karplus-Strong plucked string (physical model),
+    // handled specially in the render loop rather than as a phase oscillator.
+    static let sine = 0, square = 1, triangle = 2, saw = 3, noise = 4, rumble = 5, string = 6
 
     // Voice 0 = engine hum; voices 1–2 = the sustained per-planet ambient bed;
     // one-shot SFX draw from voice `sfxVoice0` upward.
@@ -50,8 +51,21 @@ final class AudioEngine {
         var rng: UInt32 = 0x1234_5678
         var lp: Float = 0          // low-pass state (for the rocket rumble)
         var cutoff: Float = 0.06   // rumble low-pass coefficient (higher = brighter/windier)
+        var drive: Float = 1       // >1 → tanh waveshaping (overdrive/distortion)
+        var pluck = false          // true → exponential ring-down (plucked string)
     }
     private var voices = [Voice](repeating: Voice(), count: 24)
+
+    // Karplus-Strong plucked-string state, one delay line per voice slot (used
+    // only by `wave == string`). Kept in parallel arrays — NOT in the Voice
+    // struct — so the render loop's per-voice struct copy stays cheap.
+    private let ksMaxLen = 1200                 // covers strings down to ~37 Hz at 44.1 k
+    private var ksBuf: [[Float]]
+    private var ksPos = [Int](repeating: 0, count: 24)
+    private var ksLen = [Int](repeating: 1, count: 24)
+    private var ksDecay = [Float](repeating: 1, count: 24)
+    private var ksEnv = [Float](repeating: 0, count: 24)   // peak follower → sustain compression
+    private var ksSeed: UInt32 = 0x1234_5678    // varies the pick-noise per pluck
 
     // Per-planet ambience: a sustained bed (voices 1–2) plus sparse one-shot
     // events scheduled on the game thread. `ambientName` tracks which profile's
@@ -79,6 +93,7 @@ final class AudioEngine {
     }()
 
     init() {
+        ksBuf = Array(repeating: [Float](repeating: 0, count: ksMaxLen), count: voices.count)
         let s = GameSettings.shared
         musicGain = s.musicVolume
         sfxGain = s.sfxVolume
@@ -117,13 +132,50 @@ final class AudioEngine {
                     env = 1
                 } else {
                     let elapsed = voice.total - voice.samplesLeft
-                    env = elapsed < voice.attack
-                        ? Float(elapsed) / Float(max(1, voice.attack))
-                        : Float(voice.samplesLeft) / Float(max(1, voice.total - voice.attack))
+                    if elapsed < voice.attack {
+                        env = Float(elapsed) / Float(max(1, voice.attack))
+                    } else if voice.wave == AudioEngine.string {
+                        // Sustain-compressed string: its own level is flattened,
+                        // so the amp env shapes the decay — an exponential fade
+                        // (electric-guitar sustain that sings then dies away),
+                        // with a short release guard against an end click.
+                        let e = Float(elapsed - voice.attack) / Float(max(1, voice.total - voice.attack))
+                        env = expf(-3.0 * e) * (voice.samplesLeft < 600 ? Float(voice.samplesLeft) / 600 : 1)
+                    } else if voice.pluck {
+                        // Exponential ring-down: a string trails off rather than
+                        // fading linearly to a sudden stop.
+                        let e = Float(elapsed - voice.attack) / Float(max(1, voice.total - voice.attack))
+                        env = expf(-4.0 * e)
+                    } else {
+                        env = Float(voice.samplesLeft) / Float(max(1, voice.total - voice.attack))
+                    }
                 }
                 let busGain = voice.bus == AudioEngine.busMusic ? musicGain
                             : voice.bus == AudioEngine.busAmbient ? ambientGain * ambientFade : sfxGain
-                out[i] += osc(&voice) * voice.amp * env * busGain
+                var sample: Float
+                if voice.wave == AudioEngine.string {
+                    // Karplus-Strong: read the delay line, write back the
+                    // low-pass-averaged (+ slight decay) value — the loop
+                    // resonates and damps like a real plucked string.
+                    let n = ksLen[v], p = ksPos[v]
+                    let nxt = p + 1 == n ? 0 : p + 1
+                    let raw = ksBuf[v][p]
+                    ksBuf[v][p] = ksDecay[v] * 0.5 * (raw + ksBuf[v][nxt])
+                    ksPos[v] = nxt
+                    // Sustain compression: a peak follower (fast attack, slow
+                    // release) tracks the string's level; dividing by it holds
+                    // the signal near unity as the string decays, so the drive
+                    // below stays saturated (singing electric sustain) instead of
+                    // cleaning up into a koto-like ring. The amp envelope, not the
+                    // string level, then shapes the note's decay.
+                    let a = abs(raw)
+                    ksEnv[v] += (a - ksEnv[v]) * (a > ksEnv[v] ? 0.5 : 0.0006)
+                    sample = raw / max(ksEnv[v], 0.04)
+                } else {
+                    sample = osc(&voice)
+                }
+                if voice.drive > 1 { sample = tanhf(sample * voice.drive) }   // overdrive
+                out[i] += sample * voice.amp * env * busGain
                 voice.phase += voice.freq / sr
                 if voice.phase >= 1 { voice.phase -= 1 }
                 voice.freq *= voice.slide
@@ -183,7 +235,8 @@ final class AudioEngine {
 
     func trigger(wave: Int, f0: Float, f1: Float, dur: Float, amp: Float,
                  attack: Float = 0.003, delay: Float = 0, music: Bool = false,
-                 ambient: Bool = false, cutoff: Float = 0.06) {
+                 ambient: Bool = false, cutoff: Float = 0.06, drive: Float = 1,
+                 pluck: Bool = false) {
         let total = max(1, Int(dur * sr))
         let slide = (f0 > 0 && f1 > 0) ? powf(f1 / f0, 1 / Float(total)) : 1
         let bus = music ? AudioEngine.busMusic : (ambient ? AudioEngine.busAmbient : AudioEngine.busSFX)
@@ -198,7 +251,57 @@ final class AudioEngine {
                                 samplesLeft: total, total: total, attack: Int(attack * sr),
                                 delay: Int(delay * sr), amp: amp, wave: wave, bus: bus,
                                 rng: UInt32(truncatingIfNeeded: 0x9E37 &+ idx &* 2654435),
-                                cutoff: cutoff)
+                                cutoff: cutoff, drive: drive, pluck: pluck)
+        }
+        os_unfair_lock_unlock(lock)
+    }
+
+    /// Pluck a Karplus-Strong string voice — a physical model of a plucked
+    /// string. A tuned delay line (length = sr / freq) is excited with a noise
+    /// burst (the "pick"); each sample it's read out and written back through a
+    /// two-point averaging low-pass (× a slight `decay`), so the loop resonates
+    /// with a full, evolving harmonic body and damps naturally like a real
+    /// string — then `drive` overdrives it for an electric tone. `dur` only
+    /// bounds how long the voice is held; the timbre's decay is the model's own.
+    func pluckString(freq: Float, dur: Float, amp: Float, decay: Float = 0.999, drive: Float = 4) {
+        let total = max(1, Int(dur * sr))
+        let n = max(2, min(ksMaxLen, Int((sr / freq).rounded())))
+        os_unfair_lock_lock(lock)
+        var idx = -1, oldest = Int.max
+        for v in AudioEngine.sfxVoice0..<voices.count {
+            if !voices[v].active { idx = v; break }
+            if voices[v].samplesLeft < oldest { oldest = voices[v].samplesLeft; idx = v }
+        }
+        if idx >= 0 {
+            var voice = Voice()
+            voice.active = true
+            voice.freq = freq
+            voice.samplesLeft = total
+            voice.total = total
+            voice.attack = Int(0.001 * sr)
+            voice.amp = amp
+            voice.wave = AudioEngine.string
+            voice.bus = AudioEngine.busMusic
+            voice.drive = drive
+            voices[idx] = voice
+            // Excite the delay line with a fresh noise burst (the pick).
+            ksLen[idx] = n; ksPos[idx] = 0; ksDecay[idx] = decay; ksEnv[idx] = 0
+            ksSeed = ksSeed &* 1_664_525 &+ 1_013_904_223
+            var r = ksSeed ^ (UInt32(truncatingIfNeeded: idx) &* 2_654_435_761)
+            for k in 0..<n {
+                r = r &* 1_664_525 &+ 1_013_904_223
+                ksBuf[idx][k] = Float(r >> 9) / Float(1 << 23) * 2 - 1
+            }
+            // Low-pass the excitation (two passes) → a warmer, rounder pluck with
+            // less metallic/bell-like high content.
+            for _ in 0..<2 {
+                var prev = ksBuf[idx][n - 1]
+                for k in 0..<n {
+                    let cur = ksBuf[idx][k]
+                    ksBuf[idx][k] = 0.5 * (cur + prev)
+                    prev = cur
+                }
+            }
         }
         os_unfair_lock_unlock(lock)
     }
