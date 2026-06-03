@@ -3,22 +3,28 @@
 Deferred items, not yet scheduled. Pick from here when ready.
 
 ## Marketing / write-up angles (for README, product page, blog post)
-- [ ] **Tiny footprint — the whole game is ~1 MB.** The game itself — the
-      universal binary with **every pixel and sound generated in code** — is
-      about **1.1 MB**, *smaller than the asset payload of many single web
-      pages*, and it would fit on a 1.44 MB floppy. Lead with this. The hook:
-      **there are zero asset files** — terrain (seamless fbm), the 3D ship hulls
-      (flat-shaded meshes), the music and SFX (a code synth), the radio voice
+- [ ] **Tiny footprint — the game is ~0.85 MB per architecture.** The game
+      itself — **every pixel and sound generated in code** — is about **0.85 MB**
+      per architecture (~1.7 MB for the universal arm64 + x86_64 binary),
+      *smaller than the asset payload of many single web pages*, and it fits on a
+      1.44 MB floppy with room to spare. Lead with this. The hook: **there are
+      zero asset files** — terrain (seamless fbm), the 3D ship hulls (flat-shaded
+      meshes), the music and SFX (a code synth — incl. a Karplus-Strong plucked
+      string and a long-form generative title theme), the radio voice
       (offline-rendered + filtered), the fonts, the particle smoke/fire — all
       synthesised at runtime. No textures, no audio files, no models to ship.
       Demoscene-style "everything from maths," running as a native Mac app.
-      - **Framing note (post-Sparkle):** the *shipped* `.app` is ~5.7 MB because
-        it embeds the **Sparkle** auto-updater framework (~3 MB) and its helper
-        apps. So phrase it as **"the game itself is ~1 MB; the rest of the
-        download is just the auto-updater."** Don't claim the whole download
-        fits on a floppy anymore — the *game* does; the bundle doesn't.
+      - **Framing notes:**
+        - The *shipped* `.app` is ~6.2 MB because it embeds the **Sparkle**
+          auto-updater framework (~3 MB) and its helper apps. Phrase it as **"the
+          game itself is under 1 MB; the rest of the download is just the
+          auto-updater"** — and even at 6.2 MB it's slim by any modern standard.
+        - The floppy line works **per architecture** (a single slice fits with
+          ~590 KB free); the *universal* binary carrying both Apple Silicon and
+          Intel is ~1.7 MB, so — fittingly — you still can't put both
+          architectures on one floppy, exactly as in 1995.
       - **README done** — rewritten as a full product README leading with this
-        hook (game ~1.2 MB, zero asset files, bundle ~5.7 MB w/ Sparkle).
+        hook (game ~0.85 MB/arch, zero asset files, bundle ~6.2 MB w/ Sparkle).
         Still to do: **product page** and **blog post** reusing the same angle.
 
 ## Scoring

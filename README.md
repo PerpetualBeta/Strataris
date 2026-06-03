@@ -18,21 +18,24 @@ textures, no audio files, no 3-D models, no fonts to ship:
   slope shading, distance haze.
 - **Ships** — flat-shaded low-poly hulls, a handful of triangles each.
 - **Music & SFX** — a from-scratch synthesiser (square/saw/triangle/noise/
-  rumble voices, envelopes, a limiter).
+  rumble voices plus a Karplus-Strong plucked string, with envelopes, overdrive
+  and a limiter); the title theme is an original long-form generative build.
 - **Radio voice comms** — speech rendered offline and band-pass-filtered into a
   crackly cockpit-radio timbre, with squelch and roger bleeps.
 - **Fonts** — a 5×7 bitmap font for the HUD, plus a Core Text rasteriser for
   proportional screens.
 - **Particles** — smoke and fire for damaged installations.
 
-The result: the game binary (a universal arm64 + x86_64 build) is **~1.2 MB** —
-*smaller than the asset payload of many single web pages*, and it would fit on a
-1.44 MB floppy. Genuinely in the 16-bit spirit: demoscene-style "everything from
-maths," running as a native Mac app.
+The result: the game is **~0.85 MB per architecture** — *smaller than the asset
+payload of many single web pages*, and it fits on a 1.44 MB floppy with room to
+spare. Genuinely in the 16-bit spirit: demoscene-style "everything from maths,"
+running as a native Mac app. (The universal binary that carries *both* Apple
+Silicon and Intel is ~1.7 MB — so, fittingly, fitting both architectures on one
+floppy is exactly as impossible as it was in 1995.)
 
-> The full shipped `.app` is **~5.7 MB**, because it embeds the
+> The full shipped `.app` is **~6.2 MB**, because it embeds the
 > [Sparkle](https://sparkle-project.org) auto-updater framework (~3 MB) for
-> in-app updates. The *game itself* is the ~1.2 MB part.
+> in-app updates. The *game itself* is the ~0.85 MB part.
 
 ## The game
 
