@@ -97,9 +97,7 @@ Keyboard always works as a fallback.
 Off by default; opt in per machine with `defaults write` (relaunch to apply):
 
 ```sh
-defaults write cc.jorviksoftware.Strataris ShowFPS           -bool true  # FPS readout, top-right
 defaults write cc.jorviksoftware.Strataris ScreenshotOnSpace -bool true  # F (or a rebindable gamepad button) saves a 1920×1080 PNG (4× nearest-neighbour) to the Desktop; Space stays fire
-defaults write cc.jorviksoftware.Strataris RadialPulseWeapon -bool true  # 3 charges (X, or a rebindable gamepad button) that wipe all enemies — those kills don't score
 ```
 
 ### Headless smoke test

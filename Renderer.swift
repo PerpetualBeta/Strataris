@@ -120,7 +120,6 @@ final class Renderer: NSObject, MTKViewDelegate {
     private var muteLatch = false
 
     // Feature-flag state (hidden flags; see FeatureFlags).
-    private var fpsSmoothed: Float = 0          // showFPS readout
     private var screenshotPending = false       // screenshotOnSpace request (edge)
     private var screenshotLatch = false
     private var pulseLatch = false
@@ -128,11 +127,13 @@ final class Renderer: NSObject, MTKViewDelegate {
 
     // Per-run level-up perks (enabled by default; availability is a pure function
     // of `level`, so it resets automatically when `level` resets to 1).
-    private var hasTargetingComputer: Bool { level >= 6 }
-    private var hasCloak: Bool { level >= 9 }
-    private var hasRadialPulse: Bool { level >= 12 }
+    // Each perk unlocks at its level, OR immediately when its (undocumented)
+    // test flag is set — see FeatureFlags.force*.
+    private var hasTargetingComputer: Bool { level >= 6 || FeatureFlags.forceTargetingComputer }
+    private var hasCloak: Bool { level >= 9 || FeatureFlags.forceCloak }
+    private var hasRadialPulse: Bool { level >= 12 || FeatureFlags.forceRadialPulse }
     /// Full 6DOF (loops, rolls, yaw) — the level-3 Axis Unlock perk.
-    private var hasAxisUnlock: Bool { level >= 3 }
+    private var hasAxisUnlock: Bool { level >= 3 || FeatureFlags.forceAxisUnlock }
     private var pulseCharges = 0                // radial pulse: granted at level 12
     private var targetLockId: Int? = nil        // targeting computer: locked craft (stable id)
     private var cloakActive: Float = 0          // seconds of cloak remaining (>0 = cloaked)
@@ -1178,8 +1179,6 @@ final class Renderer: NSObject, MTKViewDelegate {
             || (state == .warping && warpPhase >= 4))
         audio.updateAmbient(active: ambientActive, dt: dt)
 
-        // Smoothed FPS for the optional HUD readout.
-        if dt > 0 { fpsSmoothed += (1 / dt - fpsSmoothed) * 0.1 }
 
         // Refresh gamepad each frame; ignore its input while the sheet is open.
         gamepad.poll(input)
@@ -1305,9 +1304,11 @@ final class Renderer: NSObject, MTKViewDelegate {
         // `camera6` and draws the final craft positions for the frame.
 
         if active {
-            // Radial pulse weapon (feature flag): wipe every remaining craft.
-            // No score for these kills. Clearing the field trips the normal
-            // "planet cleared" win below.
+            // Test flag: keep the pulse topped up so it can be exercised from
+            // level 1 (the level-12 unlock is what normally grants charges).
+            if FeatureFlags.forceRadialPulse && pulseCharges == 0 { pulseCharges = 3 }
+            // Radial pulse weapon: wipe every remaining craft. No score for these
+            // kills. Clearing the field trips the normal "planet cleared" win below.
             if input.pulse && !pulseLatch {
                 pulseLatch = true
                 if hasRadialPulse && pulseCharges > 0 && enemies.remaining > 0 {
@@ -1569,7 +1570,6 @@ final class Renderer: NSObject, MTKViewDelegate {
 
     /// Upload the given renderer's framebuffer and blit it to the drawable.
     private func present(in view: MTKView, from vr: Canvas2D) {
-        if FeatureFlags.showFPS { vr.drawFPS(Int(fpsSmoothed.rounded())) }
         if screenshotPending { screenshotPending = false; saveScreenshot(from: vr) }
         let region = MTLRegionMake2D(0, 0, RenderConfig.width, RenderConfig.height)
         texture.replace(region: region, mipmapLevel: 0,

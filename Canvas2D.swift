@@ -415,13 +415,6 @@ final class Canvas2D {
                   x: rx, y: y, color: phos)
     }
 
-    /// Feature flag: digital FPS readout, top-right corner.
-    func drawFPS(_ fps: Int) {
-        let s = "\(min(999, max(0, fps))) FPS"
-        Font.draw(s, into: framebuffer, w: width, h: height,
-                  x: width - Font.width(s) - 4, y: 4, color: packRGBA(120, 255, 160))
-    }
-
     /// Perk: remaining radial-pulse charges, top-left corner.
     func drawPulseCharges(_ n: Int) {
         Font.draw("PULSE \(max(0, n))", into: framebuffer, w: width, h: height,
