@@ -151,7 +151,13 @@ Deferred items, not yet scheduled. Pick from here when ready.
       fly and dogfight; always at least one in view; fresh waves warp in). (A
       dedicated high-score *viewer* screen beyond the title line is still
       possible future work.)
-- [ ] Cockpit frame — art surround for the HUD.
+- [~] Cockpit frame — art surround for the HUD. **Decided against (bolt-on).**
+      Tried an A-pillar/canopy frame grafted onto the existing bottom dashboard;
+      it always read as two separate objects, because the dashboard was designed
+      as a standalone panel, not part of a whole cockpit. A frame would only work
+      if the *entire* cockpit were designed around it from the start — not worth a
+      ground-up redesign at this stage. Leaving the open viewport + bottom console
+      as-is. Revisit only as part of a deliberate full-cockpit redesign.
 - [x] **Async warp** — done. `beginWarp` generates the next planet
       (`Terrain` + `StructureField` + `EnemyField`) on a background thread and
       stages its GPU vertex patch off-thread (`mesh.stageTerrain`), all while the
