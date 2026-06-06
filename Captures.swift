@@ -89,38 +89,40 @@ enum Captures {
             return out
         }
 
-        // A firefight, kept crisp: explosions on DISTANT craft (so additive glow
-        // doesn't balloon up close), a smoke plume, and incoming enemy bolts held
-        // at a readable distance. The player's own fire is the 2D drawTracers.
+        // A firefight: big, dynamic explosion blooms across the swarm, smoke
+        // plumes, the player's bolts streaking out to several targets, and enemy
+        // bolts raining back.
         func storm(cam: SIMD3<Float>, ents: [(kind: EnemyKind, model: simd_float4x4)], seed: Int) -> [Billboard] {
             var fx = [Billboard]()
             if ents.isEmpty { return fx }
-            let far = ents.filter { simd_distance(col3($0.model), cam) > 260 }
-            let pool = far.isEmpty ? ents : far
-            // a couple of explosions
+            // explosions (additive core + glow) — dynamic blooms
+            for k in 0..<3 {
+                let c = col3(ents[(k * 7 + 3) % ents.count].model)
+                let s = 26 + Float(k) * 8
+                fx.append(Billboard(center: c, size: s,       color: SIMD4(1.0, 0.82, 0.40, 0.95), additive: true))
+                fx.append(Billboard(center: c, size: s * 1.7, color: SIMD4(1.0, 0.45, 0.16, 0.5),  additive: true))
+            }
+            // smoke plumes from a couple of stricken craft
             for k in 0..<2 {
-                let c = col3(pool[(k * 3 + 1) % pool.count].model)
-                let s = 15 + Float(k) * 6
-                fx.append(Billboard(center: c, size: s,       color: SIMD4(1.0, 0.85, 0.45, 0.9),  additive: true))
-                fx.append(Billboard(center: c, size: s * 1.5, color: SIMD4(1.0, 0.5, 0.2, 0.32),    additive: true))
-            }
-            // one smoke plume
-            let sm = col3(pool[0].model)
-            for j in 0..<5 {
-                let p = sm + SIMD3<Float>(Float(j) * 4, Float(j) * 2, 20 + Float(j) * 14)
-                fx.append(Billboard(center: p, size: 10 + Float(j) * 4, color: SIMD4(0.5, 0.5, 0.55, 0.45 - Float(j) * 0.07), additive: false))
-            }
-            // incoming enemy bolts — kept ≥160 units off the camera so they read
-            // as crisp tracers, not foreground blobs.
-            let muzzle = SIMD3<Float>(cam.x, cam.y - 30, cam.z - 10)
-            for k in 0..<10 {
-                let src = col3(ents[(k * 3) % ents.count].model)
-                let toCam = muzzle - src, d = simd_length(toCam)
-                if d < 200 { continue }
-                let p = src + toCam * (0.2 + rnd(k, seed + 9) * 0.45 * (d - 160) / d)
-                if simd_distance(p, cam) > 160 {
-                    fx.append(Billboard(center: p, size: 4, color: SIMD4(1, 0.45, 0.2, 1), additive: true))
+                let base = col3(ents[(k * 5 + 1) % ents.count].model)
+                for j in 0..<5 {
+                    let p = base + SIMD3<Float>(Float(j) * 5, Float(j) * 3, 24 + Float(j) * 16)
+                    fx.append(Billboard(center: p, size: 12 + Float(j) * 5, color: SIMD4(0.5, 0.5, 0.55, 0.5 - Float(j) * 0.07), additive: false))
                 }
+            }
+            // player bolts — streaks from the ship nose to several craft
+            let muzzle = SIMD3<Float>(cam.x, cam.y - 24, cam.z - 12)
+            for k in 0..<5 {
+                let target = col3(ents[(k * 4 + 2) % ents.count].model)
+                for s in 0...6 {
+                    let f = Float(s) / 6
+                    fx.append(Billboard(center: muzzle + (target - muzzle) * f, size: 4, color: SIMD4(1, 1, 0.6, 1), additive: true))
+                }
+            }
+            // enemy bolts raining toward the player
+            for k in 0..<9 {
+                let src = col3(ents[(k * 3) % ents.count].model)
+                fx.append(Billboard(center: src + (muzzle - src) * (0.25 + rnd(k, seed + 9) * 0.5), size: 5, color: SIMD4(1, 0.4, 0.2, 1), additive: true))
             }
             return fx
         }

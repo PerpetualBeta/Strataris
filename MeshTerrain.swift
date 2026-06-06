@@ -301,8 +301,10 @@ final class MeshTerrainRenderer {
     private let fxCapacityVerts = 4096                 // ~680 billboards/frame
 
     let width: Int, height: Int
-    let colorTex: MTLTexture
+    let colorTex: MTLTexture                 // resolved (1×) colour read back / sampled
     private let depthTex: MTLTexture
+    private let sampleCount: Int             // 4× MSAA where supported, else 1
+    private let msaaColorTex: MTLTexture?    // multisample target, resolved into colorTex
 
     // Streaming terrain patch: a fixed-size grid that recenters on the camera as
     // it flies. The heightmap wraps (Terrain & mask), so re-sampling a moving
@@ -436,6 +438,11 @@ final class MeshTerrainRenderer {
         self.centerCell = SIMD2<Int>(patchCenterX, patchCenterY)
         guard let q = device.makeCommandQueue() else { return nil }
         self.queue = q
+        // 4× MSAA where supported — smooths the edges between adjacent flat-shaded
+        // terrain triangles (coastlines, height-band boundaries) without losing
+        // the chunky look. Falls back to 1× on any device that can't do it.
+        let sc = device.supportsTextureSampleCount(4) ? 4 : 1
+        self.sampleCount = sc
 
         let lib: MTLLibrary
         do { lib = try device.makeLibrary(source: MeshTerrainRenderer.shaderSource, options: nil) }
@@ -462,6 +469,7 @@ final class MeshTerrainRenderer {
             md.colorAttachments[0].sourceAlphaBlendFactor = .one
             md.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
             md.depthAttachmentPixelFormat = .depth32Float
+            md.rasterSampleCount = sc
             self.meshPipeline = try device.makeRenderPipelineState(descriptor: md)
 
             let sd = MTLRenderPipelineDescriptor()
@@ -469,6 +477,7 @@ final class MeshTerrainRenderer {
             sd.fragmentFunction = lib.makeFunction(name: "f_sky")
             sd.colorAttachments[0].pixelFormat = .rgba8Unorm
             sd.depthAttachmentPixelFormat = .depth32Float
+            sd.rasterSampleCount = sc
             self.skyPipeline = try device.makeRenderPipelineState(descriptor: sd)
 
             // Entity (craft) layout: float3 pos @0, float3 normal @16, float4 col @32.
@@ -490,6 +499,7 @@ final class MeshTerrainRenderer {
             ed.colorAttachments[0].sourceAlphaBlendFactor = .one
             ed.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
             ed.depthAttachmentPixelFormat = .depth32Float
+            ed.rasterSampleCount = sc
             self.entityPipeline = try device.makeRenderPipelineState(descriptor: ed)
 
             // Billboard layout: float3 center @0, float4 (corner.xy, size) @16, float4 col @32.
@@ -512,6 +522,7 @@ final class MeshTerrainRenderer {
                 d.colorAttachments[0].sourceAlphaBlendFactor = .one
                 d.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
                 d.depthAttachmentPixelFormat = .depth32Float
+                d.rasterSampleCount = sc
                 return try device.makeRenderPipelineState(descriptor: d)
             }
             self.bbAddPipeline = try bbPipeline(additive: true)
@@ -535,7 +546,8 @@ final class MeshTerrainRenderer {
         }
         self.fxBufs = fxPool
 
-        // Offscreen colour (shared so we can read it back headless) + depth.
+        // Offscreen colour (shared so we can read it back headless) — the MSAA
+        // pass resolves into this 1× texture. + depth (multisample to match).
         let cdesc = MTLTextureDescriptor.texture2DDescriptor(
             pixelFormat: .rgba8Unorm, width: width, height: height, mipmapped: false)
         cdesc.usage = [.renderTarget, .shaderRead]
@@ -543,10 +555,24 @@ final class MeshTerrainRenderer {
         guard let ct = device.makeTexture(descriptor: cdesc) else { return nil }
         self.colorTex = ct
 
+        if sc > 1 {
+            let mdesc = MTLTextureDescriptor.texture2DDescriptor(
+                pixelFormat: .rgba8Unorm, width: width, height: height, mipmapped: false)
+            mdesc.textureType = .type2DMultisample
+            mdesc.sampleCount = sc
+            mdesc.usage = .renderTarget
+            mdesc.storageMode = .private
+            guard let mt = device.makeTexture(descriptor: mdesc) else { return nil }
+            self.msaaColorTex = mt
+        } else {
+            self.msaaColorTex = nil
+        }
+
         let ddesc = MTLTextureDescriptor.texture2DDescriptor(
             pixelFormat: .depth32Float, width: width, height: height, mipmapped: false)
         ddesc.usage = .renderTarget
         ddesc.storageMode = .private
+        if sc > 1 { ddesc.textureType = .type2DMultisample; ddesc.sampleCount = sc }
         guard let dt = device.makeTexture(descriptor: ddesc) else { return nil }
         self.depthTex = dt
 
@@ -686,10 +712,16 @@ final class MeshTerrainRenderer {
         let vp = proj * view
 
         let pass = MTLRenderPassDescriptor()
-        pass.colorAttachments[0].texture = colorTex
         pass.colorAttachments[0].loadAction = .clear
         pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1)
-        pass.colorAttachments[0].storeAction = .store
+        if let msaa = msaaColorTex {
+            pass.colorAttachments[0].texture = msaa            // render multisampled…
+            pass.colorAttachments[0].resolveTexture = colorTex // …resolve into the 1× readback texture
+            pass.colorAttachments[0].storeAction = .multisampleResolve
+        } else {
+            pass.colorAttachments[0].texture = colorTex
+            pass.colorAttachments[0].storeAction = .store
+        }
         pass.depthAttachment.texture = depthTex
         pass.depthAttachment.loadAction = .clear
         pass.depthAttachment.clearDepth = 1.0
