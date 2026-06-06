@@ -173,6 +173,59 @@ final class Canvas2D {
         }
     }
 
+    /// Xiaolin-Wu anti-aliased line (coverage-blended), used for the hyperspace
+    /// star streaks so they don't stair-step. `bright` scales the blend.
+    private func wuLine(_ x0i: Float, _ y0i: Float, _ x1i: Float, _ y1i: Float, _ color: UInt32, _ bright: Float) {
+        var x0 = x0i, y0 = y0i, x1 = x1i, y1 = y1i
+        let steep = abs(y1 - y0) > abs(x1 - x0)
+        if steep { swap(&x0, &y0); swap(&x1, &y1) }
+        if x0 > x1 { swap(&x0, &x1); swap(&y0, &y1) }
+        let dx = x1 - x0, dy = y1 - y0
+        let grad = dx == 0 ? 1 : dy / dx
+        var inter = y0
+        let xs = Int(x0.rounded()), xe = Int(x1.rounded())
+        if xe < xs { return }
+        for x in xs...xe {
+            let yi = Int(floorf(inter)), fr = inter - Float(yi)
+            if steep {
+                blendPixel(yi, x, color, (1 - fr) * bright)
+                blendPixel(yi + 1, x, color, fr * bright)
+            } else {
+                blendPixel(x, yi, color, (1 - fr) * bright)
+                blendPixel(x, yi + 1, color, fr * bright)
+            }
+            inter += grad
+        }
+    }
+
+    // MARK: Value noise (planet surface detail)
+
+    @inline(__always) private func smooth01(_ t: Float) -> Float {
+        let u = max(0, min(1, t)); return u * u * (3 - 2 * u)
+    }
+    @inline(__always) private func hash3(_ ix: Int, _ iy: Int, _ iz: Int) -> Float {
+        var h = UInt32(truncatingIfNeeded: ix &* 374_761_393 &+ iy &* 668_265_263 &+ iz &* 1_274_126_177)
+        h = (h ^ (h >> 13)) &* 1_274_126_177
+        return Float((h >> 8) & 0xFFFF) / 65535.0
+    }
+    private func vnoise3(_ x: Float, _ y: Float, _ z: Float) -> Float {
+        let xi = floorf(x), yi = floorf(y), zi = floorf(z)
+        let u = smooth01(x - xi), v = smooth01(y - yi), w = smooth01(z - zi)
+        let ix = Int(xi), iy = Int(yi), iz = Int(zi)
+        @inline(__always) func L(_ a: Float, _ b: Float, _ t: Float) -> Float { a + (b - a) * t }
+        let x00 = L(hash3(ix, iy, iz),     hash3(ix + 1, iy, iz),     u)
+        let x10 = L(hash3(ix, iy + 1, iz), hash3(ix + 1, iy + 1, iz), u)
+        let x01 = L(hash3(ix, iy, iz + 1),     hash3(ix + 1, iy, iz + 1),     u)
+        let x11 = L(hash3(ix, iy + 1, iz + 1), hash3(ix + 1, iy + 1, iz + 1), u)
+        return L(L(x00, x10, v), L(x01, x11, v), w)
+    }
+    private func fbm3(_ x: Float, _ y: Float, _ z: Float) -> Float {
+        var sum: Float = 0, amp: Float = 0.5, norm: Float = 0
+        var fx = x, fy = y, fz = z
+        for _ in 0..<3 { sum += amp * vnoise3(fx, fy, fz); norm += amp; amp *= 0.5; fx *= 2; fy *= 2; fz *= 2 }
+        return sum / norm
+    }
+
     // MARK: HUD + radar (call last, over everything)
 
     // MARK: Warp cut-scene scenes (drawn into this renderer's framebuffer)
@@ -196,30 +249,51 @@ final class Canvas2D {
         }
     }
 
-    /// A shaded planet globe (with a faint atmosphere rim).
-    func drawGlobe(cx: Int, cy: Int, r: Int, base: (Float, Float, Float)) {
+    /// A shaded planet globe: procedural land/sea continents and ice caps, lit by
+    /// a fixed sun, with a TRANSPARENT atmosphere — a soft limb glow blended over
+    /// the surface plus an outer halo blended over the starfield (so it reads as
+    /// thin air, not a solid blue ring). Slowly rotates by `time`.
+    func drawGlobe(cx: Int, cy: Int, r: Int, base: (Float, Float, Float), time: Float) {
         if r < 1 { return }
         var lx: Float = -0.5, ly: Float = -0.4, lz: Float = 0.76
         let ll = sqrtf(lx * lx + ly * ly + lz * lz); lx /= ll; ly /= ll; lz /= ll
-        for dy in -r...r {
+        let rf = Float(r)
+        let haloR = Int(rf * 1.22)
+        let rot = time * 0.25, cr = cosf(rot), sr = sinf(rot)
+        let atmo = (Float(150), Float(196), Float(255))
+        // continental tone derived from the sea/base colour
+        let lr = min(255, base.0 * 0.6 + 96), lg = min(255, base.1 * 0.68 + 78), lb = min(255, base.2 * 0.5 + 44)
+        for dy in -haloR...haloR {
             let py = cy + dy
             if py < 0 || py >= height { continue }
-            let row = py * width
-            for dx in -r...r {
+            for dx in -haloR...haloR {
                 let px = cx + dx
                 if px < 0 || px >= width { continue }
-                let nx = Float(dx) / Float(r), ny = Float(dy) / Float(r)
-                let e = nx * nx + ny * ny
-                if e > 1 { continue }
-                if e > 0.90 {                                   // atmosphere rim glow
-                    framebuffer[row + px] = packRGBA(120, 170, 230)
+                let nx = Float(dx) / rf, ny = Float(dy) / rf
+                let dist = sqrtf(nx * nx + ny * ny)
+                if dist >= 1 {                                   // outer atmosphere halo
+                    let h = 1 - (dist - 1) / 0.22
+                    if h <= 0 { continue }
+                    blendPixel(px, py, packRGBA(UInt8(atmo.0), UInt8(atmo.1), UInt8(atmo.2)), h * h * 0.45)
                     continue
                 }
-                let nz = sqrtf(max(0, 1 - e))
-                let b = 0.16 + 0.84 * max(0, nx * lx + ny * ly + nz * lz)
-                framebuffer[row + px] = packRGBA(UInt8(min(255, base.0 * b)),
-                                                 UInt8(min(255, base.1 * b)),
-                                                 UInt8(min(255, base.2 * b)))
+                let nz = sqrtf(max(0, 1 - dist * dist))
+                // Surface: rotate the hemisphere point and sample fbm for land.
+                let rxn = nx * cr + nz * sr, rzn = -nx * sr + nz * cr
+                let n = fbm3(rxn * 2.3 + 3.1, ny * 2.3 + 1.7, rzn * 2.3 + 5.2)
+                let land = smooth01((n - 0.46) / 0.12)
+                var R = base.0 + (lr - base.0) * land
+                var G = base.1 + (lg - base.1) * land
+                var B = base.2 + (lb - base.2) * land
+                let cap = smooth01((abs(ny) - 0.80) / 0.16)      // polar ice
+                R += (236 - R) * cap * 0.85; G += (240 - G) * cap * 0.85; B += (250 - B) * cap * 0.85
+                let lit = max(0, nx * lx + ny * ly + nz * lz)
+                let b = 0.16 + 0.84 * lit
+                R *= b; G *= b; B *= b
+                let rim = smooth01((dist - 0.80) / 0.20) * (0.22 + 0.6 * lit)   // limb haze (transparent)
+                R += (atmo.0 - R) * rim; G += (atmo.1 - G) * rim; B += (atmo.2 - B) * rim
+                let cov = max(0, min(1, (1 - dist) * rf + 0.5))   // AA the limb against space
+                blendPixel(px, py, packRGBA(UInt8(min(255, R)), UInt8(min(255, G)), UInt8(min(255, B))), cov)
             }
         }
     }
@@ -240,7 +314,9 @@ final class Canvas2D {
             let ca = cosf(ang), sa = sinf(ang)
             let v = UInt8(150 + 105 * progress)
             let col = packRGBA(v, v, 255)
-            drawLine(cx + ca * (r - len), cy + sa * (r - len), cx + ca * r, cy + sa * r, col)
+            // Streaks fade in from the centre and brighten toward the rim.
+            let bright = min(1, 0.35 + 0.65 * (r / maxR) + 0.3 * progress)
+            wuLine(cx + ca * (r - len), cy + sa * (r - len), cx + ca * r, cy + sa * r, col, bright)
         }
         if progress > 0.88 {                                    // white-out flash at the jump
             let a = (progress - 0.88) / 0.12
@@ -645,32 +721,30 @@ final class Canvas2D {
 
     /// Perk: remaining radial-pulse charges, top-left corner.
     func drawPulseCharges(_ n: Int) {
-        Font.draw("PULSE \(max(0, n))", into: framebuffer, w: width, h: height,
-                  x: 4, y: 4, color: n > 0 ? packRGBA(255, 200, 90) : packRGBA(150, 120, 90))
+        let (r, g, b): (CGFloat, CGFloat, CGFloat) = n > 0 ? (1.0, 0.78, 0.35) : (0.59, 0.47, 0.35)
+        drawUnicodeCol("PULSE \(max(0, n))", x: 4, y: 2, maxWidth: 150, fontSize: 11, r, g, b)
     }
 
     /// Perk: cloak status, top-left below the pulse readout. Shows READY,
     /// the active countdown (bright cyan), or the recharge countdown (dim).
     func drawCloakStatus(active: Float, cooldown: Float) {
-        let s: String, col: UInt32
+        let s: String
+        let r: CGFloat, g: CGFloat, b: CGFloat
         if active > 0 {
-            s = "CLOAK \(Int(ceil(active)))"; col = packRGBA(120, 240, 255)
+            s = "CLOAK \(Int(ceil(active)))"; (r, g, b) = (0.47, 0.94, 1.0)
         } else if cooldown > 0 {
-            s = "CLOAK \(Int(ceil(cooldown)))"; col = packRGBA(110, 120, 140)
+            s = "CLOAK \(Int(ceil(cooldown)))"; (r, g, b) = (0.43, 0.47, 0.55)
         } else {
-            s = "CLOAK READY"; col = packRGBA(120, 255, 200)
+            s = "CLOAK READY"; (r, g, b) = (0.47, 1.0, 0.78)
         }
-        Font.draw(s, into: framebuffer, w: width, h: height, x: 4, y: 14, color: col)
+        drawUnicodeCol(s, x: 4, y: 15, maxWidth: 150, fontSize: 11, r, g, b)
     }
 
     /// Brief centred banner near the top for perk unlocks / bonuses. `t` is the
     /// seconds remaining; the text dims over its final second.
     func drawNotification(_ text: String, t: Float) {
-        let scale = 2
-        let x = (width - Font.width(text, scale: scale)) / 2
         let k = min(1, max(0, t))
-        let col = packRGBA(UInt8(255 * k), UInt8(225 * k), UInt8(110 * k))
-        Font.draw(text, into: framebuffer, w: width, h: height, x: x, y: height / 6, scale: scale, color: col)
+        drawUnicodeCentered(text, y: height / 6, fontSize: 17, 1.0, 0.88, 0.43, alpha: k)
     }
 
     func drawRadar(camera: Camera, enemies: EnemyField?, structures: StructureField?) {

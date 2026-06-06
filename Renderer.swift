@@ -833,17 +833,20 @@ final class Renderer: NSObject, MTKViewDelegate {
         func panel(_ vox: Canvas2D, _ cam: Camera, _ str: StructureField, _ en: EnemyField, _ t: Terrain,
                    blips: Bool) {
             let alt = max(0, Int(cam.height - t.heightF(cam.x, cam.y)))
+            vox.drawCanopyStruts()                              // same canopy framing as gameplay
             vox.drawCockpit(score: combat.score, basesStanding: str.standing, basesTotal: str.structures.count,
                             aliens: en.remaining, planetName: PlanetTheme.name(forLevel: level), level: level,
                             speed: Int(cam.speed), altitude: alt,
                             shield: Int(shield), maxShield: Int(maxShield), roll: cam.roll, pitch: cam.pitch)
             vox.drawRadar(camera: cam, enemies: blips ? en : nil, structures: blips ? str : nil)
             chrono(on: vox)
+            vox.warpConsole()                                  // bend the console into the wrap-around arc
         }
         let labelY = Int(Float(H) * 0.12)
 
         switch warpPhase {
         case 0:   // ascent — climb out of the current world
+            warpCam.roll = 0
             warpCam.height = camera.height + p * p * 1400
             warpCam.x += -sinf(warpCam.angle) * 36 * dt
             warpCam.y += -cosf(warpCam.angle) * 36 * dt
@@ -858,26 +861,31 @@ final class Renderer: NSObject, MTKViewDelegate {
             panel(canvas, warpCam, structures, enemies, terrain, blips: false)
             canvas.drawUnicodeCentered("DEPARTING", y: labelY, fontSize: 14, 0.82, 0.9, 1.0)
             present(in: view, from: canvas)
-        case 1:   // orbit — the planet we left, shrinking
+        case 1:   // orbit — bank away from the planet we left as it slides off
+            warpCam.roll = -0.6 * p                          // tilt away before the jump
             canvas.clearSpace(warpTime)
-            canvas.drawGlobe(cx: W / 2, cy: H / 2 - Int(18 * p), r: max(1, Int(120 - 84 * p)),
-                            base: globeColor(terrain.theme))
+            canvas.drawGlobe(cx: W / 2 + Int(p * p * 230), cy: H / 2 - Int(14 * p) + Int(p * 36),
+                            r: max(1, Int(120 - 84 * p)),
+                            base: globeColor(terrain.theme), time: warpTime)
             panel(canvas, warpCam, structures, enemies, terrain, blips: false)
             canvas.drawUnicodeCentered("LEAVING ORBIT", y: labelY, fontSize: 14, 0.82, 0.9, 1.0)
             present(in: view, from: canvas)
         case 2:   // hyperspace
+            warpCam.roll = -0.6 * (1 - p)                     // level out as the streaks take over
             canvas.drawHyperspace(time: warpTime, progress: p)
             panel(canvas, warpCam, structures, enemies, terrain, blips: false)
             canvas.drawUnicodeCentered("HYPERSPACE", y: labelY, fontSize: 16, 0.85, 0.92, 1.0)
             present(in: view, from: canvas)
         case 3:   // approach — the new planet growing
+            warpCam.roll = 0
             canvas.clearSpace(warpTime + 11)
             canvas.drawGlobe(cx: W / 2, cy: H / 2, r: Int(20 + 112 * p),
-                            base: globeColor(warpTerrain?.theme ?? terrain.theme))
+                            base: globeColor(warpTerrain?.theme ?? terrain.theme), time: warpTime)
             panel(canvas, warpCam, structures, enemies, terrain, blips: false)
             canvas.drawUnicodeCentered("APPROACHING \(PlanetTheme.name(forLevel: level).uppercased())", y: labelY, fontSize: 13, 0.85, 0.92, 1.0)
             present(in: view, from: canvas)
         default:  // 4: descent — drop into the new world
+            warpCam.roll = 0
             if let nt = warpTerrain, let ns = warpStructures, let ne = warpEnemies {
                 let g = nt.heightF(512, 512)
                 let pe = 1 - (1 - p) * (1 - p)              // ease out
