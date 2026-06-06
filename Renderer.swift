@@ -1536,16 +1536,18 @@ final class Renderer: NSObject, MTKViewDelegate {
                 let warpPrompt = gamepad.connected
                     ? "\(Gamepad.friendlyName(gamepad.binding(for: .warp))) / R TO WARP"
                     : "PRESS R TO WARP"
-                // After 10 s the banner ghosts down so the player can free-fly the
-                // cleared world with a clear view.
+                // After 10 s the banner fades right out so the player can free-fly
+                // the cleared world with a completely clear view.
                 wonTime += dt
-                let fade: Float = wonTime < 10 ? 1 : max(0.1, 1 - (wonTime - 10) * 0.9)  // → 0.1 over 1 s
-                let total = structures.structures.count
-                let sub = total > 0
-                    ? "\(structures.standing)/\(total) BASES SAVED   +\(wonBonus)    \(warpPrompt)"
-                    : "LEVEL \(level) CLEAR    \(warpPrompt)"
-                canvas.drawBanner(title: "\(PlanetTheme.name(forLevel: level).uppercased()) SECURED",
-                                 subtitle: sub, opacity: fade)
+                let fade: Float = wonTime < 10 ? 1 : max(0, 1 - (wonTime - 10) * 0.8)  // → 0 over 1.25 s
+                if fade > 0 {
+                    let total = structures.structures.count
+                    let sub = total > 0
+                        ? "\(structures.standing)/\(total) BASES SAVED   +\(wonBonus)    \(warpPrompt)"
+                        : "LEVEL \(level) CLEAR    \(warpPrompt)"
+                    canvas.drawBanner(title: "\(PlanetTheme.name(forLevel: level).uppercased()) SECURED",
+                                     subtitle: sub, opacity: fade)
+                }
             case .playing, .title, .briefing, .codex, .warping:
                 break
             }

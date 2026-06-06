@@ -144,6 +144,21 @@ final class Canvas2D {
         }
     }
 
+    /// Alpha-blend `color` onto the framebuffer pixel by coverage `a` (0…1) —
+    /// used to feather the circular dial bezels so their rims read smooth rather
+    /// than stair-stepped.
+    @inline(__always) private func blendPixel(_ px: Int, _ py: Int, _ color: UInt32, _ a: Float) {
+        if px < 0 || px >= width || py < 0 || py >= height || a <= 0 { return }
+        let i = py * width + px
+        if a >= 1 { framebuffer[i] = color; return }
+        let d = framebuffer[i]
+        let ia = 1 - a
+        let rr = Float(color & 0xFF) * a + Float(d & 0xFF) * ia
+        let gg = Float((color >> 8) & 0xFF) * a + Float((d >> 8) & 0xFF) * ia
+        let bb = Float((color >> 16) & 0xFF) * a + Float((d >> 16) & 0xFF) * ia
+        framebuffer[i] = packRGBA(UInt8(rr), UInt8(gg), UInt8(bb))
+    }
+
     private func drawLine(_ x0: Float, _ y0: Float, _ x1: Float, _ y1: Float, _ color: UInt32) {
         let dx = x1 - x0, dy = y1 - y0
         let steps = Int(max(abs(dx), abs(dy)))
@@ -283,17 +298,37 @@ final class Canvas2D {
     /// A circular metal bezel with the same screen interior, so the round dials
     /// read as part of the same machined console as the rectangular screens.
     private func dashDial(cx: Int, cy: Int, r: Int) {
-        let ro2 = r * r, ri = r - 3, ri2 = ri * ri
-        for dy in -r...r {
+        let ro = Float(r), ri = Float(r - 3)
+        // Turned-metal bezel: brightness follows the angle around the rim (lit
+        // from the top-left) so the ring reads as a continuous machined band all
+        // the way round — not a bevel that fades into the dark console on its
+        // shadow side. Endpoints stay metallic so the whole circumference shows.
+        let loR = Float(74), loG = Float(80), loB = Float(96)        // shadow-side metal
+        let hiR = Float(158), hiG = Float(168), hiB = Float(188)     // lit-side metal
+        let invSqrt2 = Float(0.70710677)
+        // Step one pixel past the rim so the outer edge can feather into the
+        // console behind it (coverage AA on both the rim and the ring/interior
+        // seam — the same alpha-blended-edge treatment as the title text).
+        for dy in -(r + 1)...(r + 1) {
             let py = cy + dy; if py < 0 || py >= height { continue }
-            let row = py * width
-            for dx in -r...r {
+            for dx in -(r + 1)...(r + 1) {
                 let px = cx + dx; if px < 0 || px >= width { continue }
-                let d2 = dx * dx + dy * dy
-                if d2 > ro2 { continue }
-                framebuffer[row + px] = d2 >= ri2
-                    ? ((dx + dy) < 0 ? dashRing : dashRingLo)    // bevelled ring (lit top-left)
-                    : dashScreenBG
+                let dist = sqrtf(Float(dx * dx + dy * dy))
+                let outer = max(0, min(1, ro + 0.5 - dist))      // 1 inside rim → 0 outside
+                if outer <= 0 { continue }
+                let ringCov = max(0, min(1, dist - (ri - 0.5)))  // 1 = bezel ring, 0 = interior
+                if ringCov <= 0 {
+                    framebuffer[py * width + px] = dashScreenBG   // solid interior, no AA needed
+                    continue
+                }
+                // Top-left light: t = 1 toward (-,-), 0 toward (+,+).
+                let nd = dist > 0.5 ? (-Float(dx) - Float(dy)) / dist * invSqrt2 : 0
+                let t = 0.5 + 0.5 * max(-1, min(1, nd))
+                let ringCol = packRGBA(UInt8(loR + (hiR - loR) * t),
+                                       UInt8(loG + (hiG - loG) * t),
+                                       UInt8(loB + (hiB - loB) * t))
+                if ringCov < 1 { framebuffer[py * width + px] = dashScreenBG }   // interior base
+                blendPixel(px, py, ringCol, ringCov >= 1 ? outer : ringCov)
             }
         }
     }
@@ -359,21 +394,25 @@ final class Canvas2D {
     /// Artificial horizon: sky/ground split by a line that banks with roll and
     /// shifts with pitch, behind a fixed orange aircraft symbol.
     private func drawAttitude(cx: Int, cy: Int, r: Int, bank: Float, pitch: Float) {
-        let bankA = bank * 3.0
+        let bankA = -bank * 3.0          // horizon tilts opposite to roll, matching the real horizon
         let sb = sinf(bankA), cb = cosf(bankA)
         let off = (pitch / 80) * Float(r) * 0.7
         let sky = packRGBA(70, 130, 210), ground = packRGBA(120, 82, 52), line = packRGBA(235, 238, 248)
-        for dy in -r...r {
+        let rf = Float(r)
+        // Feather the disc rim (coverage AA) so the sky/ground edge blends into
+        // the surrounding bezel instead of stair-stepping.
+        for dy in -(r + 1)...(r + 1) {
             let py = cy + dy
             if py < 0 || py >= height { continue }
-            let row = py * width
-            for dx in -r...r {
+            for dx in -(r + 1)...(r + 1) {
                 let px = cx + dx
                 if px < 0 || px >= width { continue }
-                if dx * dx + dy * dy > r * r { continue }
+                let cov = max(0, min(1, rf + 0.5 - sqrtf(Float(dx * dx + dy * dy))))
+                if cov <= 0 { continue }
                 let ry = -Float(dx) * sb + Float(dy) * cb
                 let d = ry - off
-                framebuffer[row + px] = abs(d) < 1.3 ? line : (d < 0 ? sky : ground)
+                let col = abs(d) < 1.3 ? line : (d < 0 ? sky : ground)
+                blendPixel(px, py, col, cov)
             }
         }
         let amber = packRGBA(255, 170, 60)
@@ -548,8 +587,11 @@ final class Canvas2D {
     // MARK: Unicode text (Core Text) — for high-score names / emoji
 
     /// Alpha-composite a premultiplied RGBA bitmap (from TextImage) at (x, y).
-    private func drawImageAlpha(_ bmp: TextImage.Bitmap, x: Int, y: Int) {
+    /// `alpha` < 1 ghosts the whole glyph (the premultiplied source scales
+    /// uniformly, so coverage and colour both fade together).
+    private func drawImageAlpha(_ bmp: TextImage.Bitmap, x: Int, y: Int, alpha: Float = 1) {
         let fb = framebuffer
+        let k = max(0, min(1, alpha))
         for sy in 0..<bmp.h {
             let py = y + sy
             if py < 0 || py >= height { continue }
@@ -560,12 +602,12 @@ final class Canvas2D {
                 let s = bmp.pixels[srow + sx]
                 let a = (s >> 24) & 0xFF
                 if a == 0 { continue }
-                if a == 255 { fb[drow + px] = s; continue }
-                let ia = Float(255 - a) / 255.0
+                if a == 255 && k >= 1 { fb[drow + px] = s; continue }
+                let ia = 1.0 - Float(a) / 255.0 * k
                 let d = fb[drow + px]
-                let rr = Float(s & 0xFF) + Float(d & 0xFF) * ia
-                let gg = Float((s >> 8) & 0xFF) + Float((d >> 8) & 0xFF) * ia
-                let bb = Float((s >> 16) & 0xFF) + Float((d >> 16) & 0xFF) * ia
+                let rr = Float(s & 0xFF) * k + Float(d & 0xFF) * ia
+                let gg = Float((s >> 8) & 0xFF) * k + Float((d >> 8) & 0xFF) * ia
+                let bb = Float((s >> 16) & 0xFF) * k + Float((d >> 16) & 0xFF) * ia
                 fb[drow + px] = packRGBA(UInt8(min(255, rr)), UInt8(min(255, gg)), UInt8(min(255, bb)))
             }
         }
@@ -573,9 +615,9 @@ final class Canvas2D {
 
     /// Rasterise and centre a Unicode string horizontally at row `y`.
     func drawUnicodeCentered(_ s: String, y: Int, fontSize: CGFloat,
-                             _ r: CGFloat, _ g: CGFloat, _ b: CGFloat) {
+                             _ r: CGFloat, _ g: CGFloat, _ b: CGFloat, alpha: Float = 1) {
         guard let bmp = TextImage.rasterize(s, fontSize: fontSize, r: r, g: g, b: b) else { return }
-        drawImageAlpha(bmp, x: (width - bmp.w) / 2, y: y)
+        drawImageAlpha(bmp, x: (width - bmp.w) / 2, y: y, alpha: alpha)
     }
 
     /// Draw a Unicode string inside a column [x, x+maxWidth], clipped to that
@@ -1015,19 +1057,23 @@ final class Canvas2D {
     /// e.g. free-flying on the PLANET CLEARED screen.
     func drawBanner(title: String, subtitle: String, opacity: Float = 1) {
         let fb = framebuffer
-        let bandY = height / 2 - 24, bandH = 50
+        let tb = TextImage.rasterize(title, fontSize: 26, r: 1.0, g: 0.88, b: 0.43)
+        let sb = subtitle.isEmpty ? nil : TextImage.rasterize(subtitle, fontSize: 11, r: 0.9, g: 0.93, b: 0.97)
+        let gap = sb == nil ? 0 : 4
+        // Lay the title+subtitle block around screen-centre, then wrap a dimmed
+        // band around it with even vertical padding (the Core Text bitmaps carry
+        // their own ascent/descent leading, so this stays balanced).
+        let blockH = (tb?.h ?? 0) + gap + (sb?.h ?? 0)
+        let blockTop = height / 2 - blockH / 2
+        let pad = 12
+        let bandY = blockTop - pad, bandH = blockH + pad * 2
         let keep = 1 - 0.68 * opacity                     // opacity 1 → the usual 0.32 dim
         for yy in max(0, bandY)..<min(height, bandY + bandH) {
             let row = yy * width
             for xx in 0..<width { fb[row + xx] = darken(fb[row + xx], keep) }
         }
-        let tScale = 3
-        let tw = Font.width(title, scale: tScale)
-        Font.draw(title, into: fb, w: width, h: height, x: (width - tw) / 2, y: height / 2 - 16,
-                  scale: tScale, color: packRGBA(255, 225, 110), alpha: opacity)
-        let sw = Font.width(subtitle, scale: 1)
-        Font.draw(subtitle, into: fb, w: width, h: height, x: (width - sw) / 2, y: height / 2 + 14,
-                  scale: 1, color: packRGBA(230, 236, 246), alpha: opacity)
+        if let tb { drawImageAlpha(tb, x: (width - tb.w) / 2, y: blockTop, alpha: opacity) }
+        if let sb { drawImageAlpha(sb, x: (width - sb.w) / 2, y: blockTop + (tb?.h ?? 0) + gap, alpha: opacity) }
     }
 }
 
