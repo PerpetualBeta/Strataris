@@ -285,6 +285,10 @@ final class Canvas2D {
     private let dashRing  = packRGBA(108, 116, 130)
     private let dashRingLo = packRGBA(44, 48, 60)
 
+    // Canopy struts: fixed geometry, so the per-pixel coverage/colour is baked
+    // once and just composited each frame (cached as packed index + colour + α).
+    private var canopyStruts: [(idx: Int, color: UInt32, alpha: Float)]?
+
     /// A recessed dark instrument screen with a consistent inset bevel — the
     /// shared "module" the whole console is built from.
     private func dashScreen(_ x: Int, _ y: Int, _ w: Int, _ h: Int) {
@@ -418,6 +422,88 @@ final class Canvas2D {
         let amber = packRGBA(255, 170, 60)
         for dx in -6...6 { plot(cx + dx, cy, amber) }            // wings
         plot(cx, cy - 1, amber); plot(cx, cy + 1, amber)
+    }
+
+    /// Two solid bubble-canopy ribs (F-16 style): they meet at a fine point at
+    /// the NOSE — bottom centre, tapered for aerodynamics — and sweep up and
+    /// outward, widening, to the top corners. Solid dark frame with a specular
+    /// highlight on the sunward edge so each rib reads as rounded canopy framing
+    /// (the glass between them is open view). No outer frame. Geometry is fixed,
+    /// so the coverage is baked once and cached.
+    private func buildCanopyStruts() {
+        var out: [(idx: Int, color: UInt32, alpha: Float)] = []
+        let W = Float(width), bottom = Float(dashTopY)
+        let dR: Float = 48, dG: Float = 54, dB: Float = 66        // solid frame body
+        let hR: Float = 175, hG: Float = 192, hB: Float = 214     // specular highlight
+
+        // One rib as a quadratic Bézier (p0 top → p2 bottom, p1 pulls the bow).
+        // `lit` is +1/-1 for which edge catches the highlight (mirror per side).
+        func rib(_ p0x: Float, _ p0y: Float, _ p1x: Float, _ p1y: Float,
+                 _ p2x: Float, _ p2y: Float, lit: Float) {
+            let N = 56
+            var xs = [Float](repeating: 0, count: N + 1)
+            var ys = [Float](repeating: 0, count: N + 1)
+            for i in 0...N {
+                let t = Float(i) / Float(N), u = 1 - t
+                xs[i] = u * u * p0x + 2 * u * t * p1x + t * t * p2x
+                ys[i] = u * u * p0y + 2 * u * t * p1y + t * t * p2y
+            }
+            var minX = width, maxX = 0, minY = height, maxY = 0
+            for i in 0...N {
+                minX = min(minX, Int(xs[i])); maxX = max(maxX, Int(xs[i]))
+                minY = min(minY, Int(ys[i])); maxY = max(maxY, Int(ys[i]))
+            }
+            let x0 = max(0, minX - 5), x1 = min(width - 1, maxX + 5)
+            let y0 = max(0, minY - 5), y1 = min(height - 1, maxY + 5)
+            if x0 > x1 || y0 > y1 { return }
+            for py in y0...y1 {
+                let qy = Float(py)
+                for px in x0...x1 {
+                    let qx = Float(px)
+                    var best: Float = 1e9, perp: Float = 0, bestT: Float = 0
+                    for k in 0..<N {
+                        let ax = xs[k], ay = ys[k], bx = xs[k + 1], by = ys[k + 1]
+                        let abx = bx - ax, aby = by - ay
+                        let l2 = max(1e-4, abx * abx + aby * aby)
+                        let tt = max(0, min(1, ((qx - ax) * abx + (qy - ay) * aby) / l2))
+                        let cxp = ax + abx * tt, cyp = ay + aby * tt
+                        let dx = qx - cxp, dy = qy - cyp
+                        let dist = sqrtf(dx * dx + dy * dy)
+                        if dist < best {
+                            best = dist
+                            let il = 1 / sqrtf(l2)
+                            perp = (dx * (-aby) + dy * abx) * il      // signed perpendicular
+                            bestT = (Float(k) + tt) / Float(N)
+                        }
+                    }
+                    let halfW: Float = 1.6 + 2.6 * bestT             // taper: fine at the nose, fuller up top
+                    let cov = max(0, min(1, halfW + 0.5 - best))
+                    if cov <= 0 { continue }
+                    let g = max(0, min(1, perp / halfW * lit))       // 0 inner edge → 1 sunward edge
+                    let hi = g * g                                   // highlight biased to the lit edge
+                    let col = packRGBA(UInt8(dR + (hR - dR) * hi),
+                                       UInt8(dG + (hG - dG) * hi),
+                                       UInt8(dB + (hB - dB) * hi))
+                    out.append((py * width + px, col, cov))          // solid; cov only feathers the rim
+                }
+            }
+        }
+        // Left rib: fine point at the nose (bottom centre), belly bowed out to
+        // the left, sweeping up to the top-left corner. Right rib mirrors it.
+        // p0 = nose (t=0, thin), p2 = top corner (t=1, fuller).
+        rib(W * 0.44, bottom + 10,  W * 0.05, bottom * 0.42,  W * 0.02, -10, lit:  1)
+        rib(W * 0.56, bottom + 10,  W * 0.95, bottom * 0.42,  W * 0.98, -10, lit: -1)
+        canopyStruts = out
+    }
+
+    /// Composite the cached canopy ribs over the current frame.
+    func drawCanopyStruts() {
+        if canopyStruts == nil { buildCanopyStruts() }
+        guard let ribs = canopyStruts else { return }
+        for r in ribs {
+            let py = r.idx / width, px = r.idx % width
+            blendPixel(px, py, r.color, r.alpha)
+        }
     }
 
     /// Dashboard chronometer: live stardate/clock + mission-elapsed time. Text

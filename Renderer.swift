@@ -1494,6 +1494,7 @@ final class Renderer: NSObject, MTKViewDelegate {
             canvas.drawCrosshair(x: RenderConfig.crosshairX, y: RenderConfig.crosshairY)
         }
 
+        canvas.drawCanopyStruts()
         canvas.drawCockpit(score: combat.score,
                           basesStanding: structures.standing,
                           basesTotal: structures.structures.count,
