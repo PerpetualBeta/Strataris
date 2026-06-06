@@ -3,12 +3,15 @@
 // Renders the salient doc/marketing shots by driving the game's REAL draw
 // methods (drawCanopyStruts / drawCockpit / warpConsole / drawGlobe /
 // drawHyperspace / drawTitleScreen / drawCodex / drawBriefing / drawGameOver)
-// in the same order the live game uses, plus the real GPU mesh renderer for the
-// world — then writes each frame to a 4× nearest-neighbour PNG. The draw code
-// is the shipping code, so the captures match the game pixel-for-pixel.
+// plus the real GPU mesh renderer for the world — then writes each frame to a
+// 4× nearest-neighbour PNG. The draw code is the shipping code, so the captures
+// match the game pixel-for-pixel.
 //
-// Not part of the shipped behaviour — a dev/marketing tool, off unless the
-// STRATARIS_SHOTS env var is set.
+// To make the shots sell the game, the world scenes are staged: a different
+// planet per shot, and dense attack formations (built as GPU entity transforms
+// directly, so we control how many craft fill the frame) with a firefight of
+// explosions, smoke and tracer bolts. Not part of the shipped behaviour — a
+// dev/marketing tool, off unless STRATARIS_SHOTS is set.
 
 import Cocoa
 import Metal
@@ -20,7 +23,6 @@ enum Captures {
         let w = RenderConfig.width, h = RenderConfig.height
         let scale = 4
 
-        // Output directory (env value, or ~/Desktop/Strataris-Shots if it was "1").
         let home = FileManager.default.homeDirectoryForCurrentUser
         let dirURL: URL = (outDir.isEmpty || outDir == "1")
             ? home.appendingPathComponent("Desktop/Strataris-Shots")
@@ -28,8 +30,9 @@ enum Captures {
         try? FileManager.default.createDirectory(at: dirURL, withIntermediateDirectories: true)
         print("Strataris screenshots → \(dirURL.path) (\(w * scale)×\(h * scale))")
 
-        let device = MTLCreateSystemDefaultDevice()
-        if device == nil { print("  ⚠︎ no Metal device — world shots skipped, 2D screens only") }
+        guard let device = MTLCreateSystemDefaultDevice() else {
+            print("  ⚠︎ no Metal device — cannot render world shots; aborting."); return
+        }
 
         var n = 0
         func save(_ canvas: Canvas2D, _ label: String) {
@@ -39,46 +42,87 @@ enum Captures {
             print("  📸 \(name)")
         }
 
-        // ---- shared scene helpers ------------------------------------------------
-
-        // Wrap a world point into the camera's neighbourhood (mirrors Renderer).
-        func wrapped(_ x: Float, _ y: Float, _ z: Float, cam: SIMD3<Float>, size: Float) -> SIMD3<Float> {
-            let half = size * 0.5
-            func near(_ v: Float, _ c: Float) -> Float {
-                var d = (v - c).truncatingRemainder(dividingBy: size)
-                if d > half { d -= size } else if d < -half { d += size }
-                return c + d
-            }
-            return SIMD3(near(x, cam.x), near(y, cam.y), z)
+        // Deterministic pseudo-random in [0,1) from an index + salt.
+        func rnd(_ i: Int, _ salt: Int) -> Float {
+            var x = UInt32(truncatingIfNeeded: (i &+ 1) &* 73_856_093 ^ (salt &+ 1) &* 19_349_663)
+            x = (x ^ (x >> 13)) &* 1_274_126_177
+            return Float((x >> 8) & 0xFFFF) / 65535.0
         }
-        func entities(_ field: EnemyField, cam: SIMD3<Float>, size: Float)
+        func col3(_ m: simd_float4x4) -> SIMD3<Float> { let c = m.columns.3; return SIMD3(c.x, c.y, c.z) }
+
+        // A craft transform matching enemyModel's basis (right, fwd, up, pos).
+        func craftModel(_ pos: SIMD3<Float>, _ fwd: SIMD3<Float>, _ s: Float) -> simd_float4x4 {
+            let f = simd_normalize(simd_length(fwd) < 1e-4 ? SIMD3(0, 1, 0) : fwd)
+            var r = simd_cross(f, SIMD3<Float>(0, 0, 1))
+            if simd_length(r) < 1e-4 { r = SIMD3(1, 0, 0) }
+            r = simd_normalize(r)
+            let u = simd_cross(r, f)
+            return simd_float4x4(columns: (SIMD4(r * s, 0), SIMD4(f * s, 0), SIMD4(u * s, 0), SIMD4(pos, 1)))
+        }
+        func scaleFor(_ k: EnemyKind) -> Float {
+            switch k { case .destroyer: return 22; case .fighter: return 16; case .drone: return 12; case .mothership: return 62 }
+        }
+
+        // A dense swarm bearing down on the colony, ahead of the camera (−Y),
+        // spread across the frame at mixed depths/altitudes/kinds, facing the
+        // player. `count` craft + a mothership anchoring the back.
+        func formation(cam: SIMD3<Float>, count: Int, terrain: Terrain, seed: Int)
             -> [(kind: EnemyKind, model: simd_float4x4)] {
-            field.enemies.map { e in
-                var m = enemyModel(e, scale: field.scale(for: e.kind))
-                m.columns.3 = SIMD4<Float>(wrapped(e.x, e.y, e.z, cam: cam, size: size), 1)
-                return (kind: e.kind, model: m)
+            var out = [(kind: EnemyKind, model: simd_float4x4)]()
+            for i in 0..<count {
+                let t = Float(i) / Float(max(1, count - 1))
+                let depth = 90 + t * 660 + (rnd(i, seed) - 0.5) * 90
+                let spread = 70 + depth * 0.6
+                let px = cam.x + (rnd(i, seed + 1) - 0.5) * 2 * spread
+                let py = cam.y - depth
+                let agl = 26 + rnd(i, seed + 2) * 150 + (1 - t) * 30
+                let pz = terrain.heightF(px, py) + agl
+                let r = rnd(i, seed + 3)
+                let kind: EnemyKind = r < 0.55 ? .drone : (r < 0.85 ? .fighter : .destroyer)
+                var fwd = SIMD3<Float>(cam.x - px, cam.y - py, (cam.z - pz) * 0.5)
+                fwd.x += (rnd(i, seed + 4) - 0.5) * 0.7 * simd_length(fwd)   // banking jitter
+                out.append((kind, craftModel(SIMD3(px, py, pz), fwd, scaleFor(kind))))
             }
+            // Mothership: high and far, centre-ish — the looming threat.
+            let mp = SIMD3<Float>(cam.x + 40, cam.y - 760, terrain.heightF(cam.x + 40, cam.y - 760) + 230)
+            out.append((.mothership, craftModel(mp, SIMD3(0, 1, -0.1), scaleFor(.mothership))))
+            return out
         }
 
-        // The full in-cockpit HUD, in gameplay order (HUD over world, struts over
-        // that, console bent last). `blips` populates the radar.
-        func panel(_ canvas: Canvas2D, planet: String, level: Int, score: Int,
-                   bases: Int, basesTotal: Int, aliens: Int,
-                   speed: Int, alt: Int, shield: Int, roll: Float, pitch: Float,
-                   cam: SIMD3<Float>, field: EnemyField?, structs: StructureField?,
-                   blips: Bool, crosshair: Bool = false) {
-            if crosshair {
-                canvas.drawCrosshair(x: Float(RenderConfig.crosshairX), y: Float(RenderConfig.crosshairY))
+        // A firefight, kept crisp: explosions on DISTANT craft (so additive glow
+        // doesn't balloon up close), a smoke plume, and incoming enemy bolts held
+        // at a readable distance. The player's own fire is the 2D drawTracers.
+        func storm(cam: SIMD3<Float>, ents: [(kind: EnemyKind, model: simd_float4x4)], seed: Int) -> [Billboard] {
+            var fx = [Billboard]()
+            if ents.isEmpty { return fx }
+            let far = ents.filter { simd_distance(col3($0.model), cam) > 260 }
+            let pool = far.isEmpty ? ents : far
+            // a couple of explosions
+            for k in 0..<2 {
+                let c = col3(pool[(k * 3 + 1) % pool.count].model)
+                let s = 15 + Float(k) * 6
+                fx.append(Billboard(center: c, size: s,       color: SIMD4(1.0, 0.85, 0.45, 0.9),  additive: true))
+                fx.append(Billboard(center: c, size: s * 1.5, color: SIMD4(1.0, 0.5, 0.2, 0.32),    additive: true))
             }
-            canvas.drawCanopyStruts()
-            canvas.drawCockpit(score: score, basesStanding: bases, basesTotal: basesTotal,
-                               aliens: aliens, planetName: planet, level: level,
-                               speed: speed, altitude: alt, shield: shield, maxShield: 100,
-                               roll: roll, pitch: pitch)
-            canvas.drawRadar(originX: cam.x, originY: cam.y, fwdX: 0, fwdY: -1, rightX: -1, rightY: 0,
-                             enemies: blips ? field : nil, structures: blips ? structs : nil)
-            canvas.drawChronometer(date: "2026.06.06", clock: "19:08", mission: "01:30")
-            canvas.warpConsole()
+            // one smoke plume
+            let sm = col3(pool[0].model)
+            for j in 0..<5 {
+                let p = sm + SIMD3<Float>(Float(j) * 4, Float(j) * 2, 20 + Float(j) * 14)
+                fx.append(Billboard(center: p, size: 10 + Float(j) * 4, color: SIMD4(0.5, 0.5, 0.55, 0.45 - Float(j) * 0.07), additive: false))
+            }
+            // incoming enemy bolts — kept ≥160 units off the camera so they read
+            // as crisp tracers, not foreground blobs.
+            let muzzle = SIMD3<Float>(cam.x, cam.y - 30, cam.z - 10)
+            for k in 0..<10 {
+                let src = col3(ents[(k * 3) % ents.count].model)
+                let toCam = muzzle - src, d = simd_length(toCam)
+                if d < 200 { continue }
+                let p = src + toCam * (0.2 + rnd(k, seed + 9) * 0.45 * (d - 160) / d)
+                if simd_distance(p, cam) > 160 {
+                    fx.append(Billboard(center: p, size: 4, color: SIMD4(1, 0.45, 0.2, 1), additive: true))
+                }
+            }
+            return fx
         }
 
         func globeColor(_ th: PlanetTheme) -> (Float, Float, Float) {
@@ -90,168 +134,154 @@ enum Captures {
             (CGFloat(th.skyTop.0) / 255, CGFloat(th.skyTop.1) / 255, CGFloat(th.skyTop.2) / 255)
         }
 
-        // ---- world (mesh-backed) scene ------------------------------------------
+        // The named worlds (index into PlanetTheme.all): Demeter, Tantalus,
+        // Boreas, Pandora, Vulcan, Vesper.
+        let mesh = MeshTerrainRenderer(device: device, terrain: Terrain(size: 4096, seed: 1, theme: PlanetTheme.all[0]), width: w, height: h)
+        guard let mesh = mesh else { print("  ⚠︎ mesh renderer init failed"); return }
 
-        let theme = PlanetTheme.all[0]                       // Demeter — the hero world
-        let terrain = Terrain(size: 4096, seed: 7, theme: theme)
-        let size = Float(terrain.size)
-        let cx: Float = 512, cy: Float = 512
-        let structures = StructureField(terrain: terrain, around: cx, cy: cy, count: 5)
-        let field = EnemyField(terrain: terrain, around: cx, cy: cy, count: 14)
-
-        // Camera: low, just behind the dense sub-cluster of the fleet (≈ world
-        // (640,−1130)) with a base nearby, looking into it so several craft and an
-        // installation fill the view.
-        let camPos = SIMD3<Float>(650, -800, terrain.heightF(650, -800) + 120)
-        let gameCam = Camera6DOF.restricted(position: camPos, heading: 0, pitch: -0.22, bank: 0.05, speed: 150)
-        let alt = max(0, Int(camPos.z - terrain.heightF(camPos.x, camPos.y)))
-
-        var mesh: MeshTerrainRenderer? = nil
-        if let device = device {
-            mesh = MeshTerrainRenderer(device: device, terrain: terrain, width: w, height: h)
-            mesh?.recenterIfNeeded(around: camPos, sync: true)
+        // Build a world scene (terrain swapped in, swarm + optional firefight
+        // rendered) and return the canvas + camera + a busy radar field.
+        struct Scene { let canvas: Canvas2D; let cam: SIMD3<Float>; let theme: PlanetTheme
+                       let field: EnemyField; let structs: StructureField; let alt: Int }
+        func world(_ themeIdx: Int, seed: Int, alt: Float, pitch: Float, bank: Float,
+                   count: Int, fire: Bool) -> Scene {
+            let theme = PlanetTheme.all[themeIdx]
+            let terrain = Terrain(size: 4096, seed: UInt32(seed), theme: theme)
+            let structs = StructureField(terrain: terrain, around: 512, cy: 512, count: 5)   // stamped into terrain
+            mesh.setTerrain(terrain)
+            let camPos = SIMD3<Float>(512, 760, terrain.heightF(512, 760) + alt)
+            mesh.recenterIfNeeded(around: camPos, sync: true)
+            let cam6 = Camera6DOF.restricted(position: camPos, heading: 0, pitch: pitch, bank: bank, speed: 150)
+            let ents = formation(cam: camPos, count: count, terrain: terrain, seed: seed)
+            let canvas = Canvas2D(width: w, height: h, mapSize: Float(terrain.size))
+            mesh.renderInto(canvas.framebuffer, camera: cam6, entities: ents, fx: fire ? storm(cam: camPos, ents: ents, seed: seed) : [])
+            let field = EnemyField(terrain: terrain, around: 512, cy: 512, count: 26)         // busy radar
+            return Scene(canvas: canvas, cam: camPos, theme: theme, field: field, structs: structs,
+                         alt: max(0, Int(camPos.z - terrain.heightF(camPos.x, camPos.y))))
         }
 
-        // Combat FX (built with the same recipe as Renderer.meshFX) for the action shot.
-        func combatFX() -> [Billboard] {
-            var fx = [Billboard]()
-            // The base nearest the camera (so the FX land in frame, not behind us).
-            let s = structures.structures.filter { $0.alive }
-                .min { hypotf($0.x - camPos.x, $0.y - camPos.y) < hypotf($1.x - camPos.x, $1.y - camPos.y) }
-            if let s = s {
-                let c = wrapped(s.x, s.y, terrain.heightF(s.x, s.y) + 14, cam: camPos, size: size)
-                fx.append(Billboard(center: c, size: 30, color: SIMD4(1.0, 0.82, 0.40, 0.9), additive: true))
-                fx.append(Billboard(center: c, size: 52, color: SIMD4(1.0, 0.45, 0.16, 0.5), additive: true))
-                for k in 0..<5 {
-                    let p = wrapped(s.x + Float(k) * 6, s.y, terrain.heightF(s.x, s.y) + 30 + Float(k) * 12,
-                                    cam: camPos, size: size)
-                    fx.append(Billboard(center: p, size: 14 + Float(k) * 4, color: SIMD4(0.5, 0.5, 0.55, 0.45), additive: false))
-                }
-            }
-            // a couple of tracer bolts converging downrange
-            for e in field.enemies.prefix(2) {
-                fx.append(Billboard(center: wrapped(e.x, e.y, e.z, cam: camPos, size: size),
-                                    size: 4, color: SIMD4(1, 1, 0.6, 1), additive: true))
-            }
-            return fx
+        // The in-cockpit HUD in gameplay order (HUD over world, struts over that,
+        // console bent last).
+        func hud(_ s: Scene, score: Int, bases: Int, aliens: Int, speed: Int, shield: Int,
+                 roll: Float, pitch: Float, blips: Bool, crosshair: Bool) {
+            if crosshair { s.canvas.drawCrosshair(x: Float(RenderConfig.crosshairX), y: Float(RenderConfig.crosshairY)) }
+            s.canvas.drawCanopyStruts()
+            s.canvas.drawCockpit(score: score, basesStanding: bases, basesTotal: 5, aliens: aliens,
+                                 planetName: s.theme.name, level: 1, speed: speed, altitude: s.alt,
+                                 shield: shield, maxShield: 100, roll: roll, pitch: pitch)
+            s.canvas.drawRadar(originX: s.cam.x, originY: s.cam.y, fwdX: 0, fwdY: -1, rightX: -1, rightY: 0,
+                               enemies: blips ? s.field : nil, structures: blips ? s.structs : nil)
+            s.canvas.drawChronometer(date: "2026.06.06", clock: "19:08", mission: "01:30")
+            s.canvas.warpConsole()
         }
 
-        // 1 — Title screen (wordmark over a live-style backdrop).
+        // A space panel (warp transit): no world, banked/level dial, empty radar.
+        func spacePanel(_ canvas: Canvas2D, planet: String, level: Int, roll: Float, alt: Int) {
+            canvas.drawCanopyStruts()
+            canvas.drawCockpit(score: 24300, basesStanding: 5, basesTotal: 5, aliens: 0,
+                               planetName: planet, level: level, speed: 30, altitude: alt,
+                               shield: 100, maxShield: 100, roll: roll, pitch: 0)
+            canvas.drawRadar(originX: 512, originY: 512, fwdX: 0, fwdY: -1, rightX: -1, rightY: 0,
+                             enemies: nil, structures: nil)
+            canvas.drawChronometer(date: "2026.06.06", clock: "19:08", mission: "02:05")
+            canvas.warpConsole()
+        }
+        let labelY = Int(Float(h) * 0.12)
+
+        // ===== shots =============================================================
+
+        // 1 — Title (Demeter), swarm behind the wordmark.
         do {
-            let canvas = Canvas2D(width: w, height: h, mapSize: size)
-            if let mesh = mesh {
-                mesh.renderInto(canvas.framebuffer, camera: gameCam, entities: entities(field, cam: camPos, size: size))
-            }
-            canvas.drawTitleScreen(time: 0.3, topName: "ACE", topScore: 48250,
-                                   startHint: "Press Fire to Start",
-                                   configHint: "[K] Configure Keyboard",
-                                   nebula: nebula(theme))
-            save(canvas, "title")
+            let s = world(0, seed: 7, alt: 110, pitch: -0.16, bank: 0.04, count: 18, fire: false)
+            s.canvas.drawTitleScreen(time: 0.3, topName: "ACE", topScore: 48250,
+                                     startHint: "Press Fire to Start", configHint: "[K] Configure Keyboard",
+                                     nebula: nebula(s.theme))
+            save(s.canvas, "title")
         }
 
-        // 2 — Gameplay hero (full cockpit over the battle).
-        if let mesh = mesh {
-            let canvas = Canvas2D(width: w, height: h, mapSize: size)
-            mesh.renderInto(canvas.framebuffer, camera: gameCam,
-                            entities: entities(field, cam: camPos, size: size))
-            panel(canvas, planet: theme.name, level: 1, score: 12840,
-                  bases: 5, basesTotal: 5, aliens: field.remaining,
-                  speed: 150, alt: alt, shield: 100, roll: 0.05, pitch: -0.22,
-                  cam: camPos, field: field, structs: structures, blips: true, crosshair: true)
-            save(canvas, "gameplay")
-        }
-
-        // 3 — Combat moment (explosion + smoke + tracers).
-        if let mesh = mesh {
-            let canvas = Canvas2D(width: w, height: h, mapSize: size)
-            mesh.renderInto(canvas.framebuffer, camera: gameCam,
-                            entities: entities(field, cam: camPos, size: size), fx: combatFX())
-            canvas.drawTracers(crosshairX: Float(RenderConfig.crosshairX), crosshairY: Float(RenderConfig.crosshairY))
-            panel(canvas, planet: theme.name, level: 1, score: 13620,
-                  bases: 4, basesTotal: 5, aliens: max(0, field.remaining - 2),
-                  speed: 168, alt: alt, shield: 72, roll: -0.10, pitch: -0.22,
-                  cam: camPos, field: field, structs: structures, blips: true, crosshair: true)
-            save(canvas, "combat")
-        }
-
-        // 4 — Level clear (SECURED banner + bases-saved bonus).
-        if let mesh = mesh {
-            let canvas = Canvas2D(width: w, height: h, mapSize: size)
-            mesh.renderInto(canvas.framebuffer, camera: gameCam)
-            panel(canvas, planet: theme.name, level: 1, score: 18900,
-                  bases: 5, basesTotal: 5, aliens: 0,
-                  speed: 150, alt: alt, shield: 100, roll: 0.05, pitch: -0.22,
-                  cam: camPos, field: field, structs: structures, blips: false)
-            canvas.drawBanner(title: "\(theme.name.uppercased()) SECURED",
-                              subtitle: "5/5 BASES SAVED   +2500    PRESS R TO WARP")
-            save(canvas, "level-clear")
-        }
-
-        // 5 — Warp: leaving orbit (banked away, departed planet w/ atmosphere).
+        // 2 — Gameplay hero (Vesper) — dense incoming swarm.
         do {
-            let canvas = Canvas2D(width: w, height: h, mapSize: size)
+            let s = world(5, seed: 21, alt: 105, pitch: -0.20, bank: 0.06, count: 22, fire: false)
+            hud(s, score: 12840, bases: 5, aliens: s.field.remaining, speed: 150, shield: 100,
+                roll: 0.06, pitch: -0.20, blips: true, crosshair: true)
+            save(s.canvas, "gameplay")
+        }
+
+        // 3 — Combat (Vulcan) — full firefight.
+        do {
+            let s = world(4, seed: 33, alt: 100, pitch: -0.18, bank: -0.10, count: 26, fire: true)
+            s.canvas.drawTracers(crosshairX: Float(RenderConfig.crosshairX), crosshairY: Float(RenderConfig.crosshairY))
+            hud(s, score: 21360, bases: 3, aliens: s.field.remaining, speed: 178, shield: 64,
+                roll: -0.10, pitch: -0.18, blips: true, crosshair: true)
+            save(s.canvas, "combat")
+        }
+
+        // 4 — Combat (Pandora) — a second, different firefight (alt hero).
+        do {
+            let s = world(3, seed: 51, alt: 120, pitch: -0.24, bank: 0.12, count: 24, fire: true)
+            s.canvas.drawTracers(crosshairX: Float(RenderConfig.crosshairX), crosshairY: Float(RenderConfig.crosshairY))
+            hud(s, score: 33820, bases: 4, aliens: s.field.remaining, speed: 168, shield: 80,
+                roll: 0.12, pitch: -0.24, blips: true, crosshair: true)
+            save(s.canvas, "combat-2")
+        }
+
+        // 5 — Level clear (Boreas) — banner over a few stragglers.
+        do {
+            let s = world(2, seed: 14, alt: 110, pitch: -0.20, bank: 0.03, count: 6, fire: false)
+            hud(s, score: 41200, bases: 5, aliens: 0, speed: 150, shield: 100,
+                roll: 0.03, pitch: -0.20, blips: false, crosshair: false)
+            s.canvas.drawBanner(title: "\(s.theme.name.uppercased()) SECURED",
+                                subtitle: "5/5 BASES SAVED   +2500    PRESS R TO WARP")
+            save(s.canvas, "level-clear")
+        }
+
+        // 6 — Warp: leaving orbit (departing Pandora).
+        do {
+            let canvas = Canvas2D(width: w, height: h, mapSize: 4096)
             canvas.clearSpace(3.0)
-            canvas.drawGlobe(cx: w / 2 + 150, cy: h / 2 + 22, r: 78,
-                             base: globeColor(theme), time: 2.0)
-            panel(canvas, planet: theme.name, level: 1, score: 18900,
-                  bases: 5, basesTotal: 5, aliens: 0,
-                  speed: 30, alt: 9000, shield: 100, roll: -0.55, pitch: 0,
-                  cam: camPos, field: nil, structs: nil, blips: false)
-            canvas.drawUnicodeCentered("LEAVING ORBIT", y: Int(Float(h) * 0.12), fontSize: 14, 0.82, 0.9, 1.0)
+            canvas.drawGlobe(cx: w / 2 + 150, cy: h / 2 + 22, r: 78, base: globeColor(PlanetTheme.all[3]), time: 2.0)
+            spacePanel(canvas, planet: "Pandora", level: 4, roll: -0.55, alt: 9000)
+            canvas.drawUnicodeCentered("LEAVING ORBIT", y: labelY, fontSize: 14, 0.82, 0.9, 1.0)
             save(canvas, "warp-orbit")
         }
 
-        // 6 — Warp: hyperspace.
+        // 7 — Warp: hyperspace.
         do {
-            let canvas = Canvas2D(width: w, height: h, mapSize: size)
+            let canvas = Canvas2D(width: w, height: h, mapSize: 4096)
             canvas.drawHyperspace(time: 1.4, progress: 0.62)
-            panel(canvas, planet: theme.name, level: 2, score: 18900,
-                  bases: 5, basesTotal: 5, aliens: 0,
-                  speed: 30, alt: 0, shield: 100, roll: 0, pitch: 0,
-                  cam: camPos, field: nil, structs: nil, blips: false)
-            canvas.drawUnicodeCentered("HYPERSPACE", y: Int(Float(h) * 0.12), fontSize: 16, 0.85, 0.92, 1.0)
+            spacePanel(canvas, planet: "Pandora", level: 5, roll: 0, alt: 0)
+            canvas.drawUnicodeCentered("HYPERSPACE", y: labelY, fontSize: 16, 0.85, 0.92, 1.0)
             save(canvas, "warp-hyperspace")
         }
 
-        // 7 — Warp: approaching the next world.
+        // 8 — Warp: approaching the next world (Tantalus).
         do {
-            let next = PlanetTheme.all[1]                    // Tantalus
-            let canvas = Canvas2D(width: w, height: h, mapSize: size)
+            let next = PlanetTheme.all[1]
+            let canvas = Canvas2D(width: w, height: h, mapSize: 4096)
             canvas.clearSpace(14.0)
             canvas.drawGlobe(cx: w / 2, cy: h / 2, r: 104, base: globeColor(next), time: 3.0)
-            panel(canvas, planet: next.name, level: 2, score: 18900,
-                  bases: 0, basesTotal: 5, aliens: 0,
-                  speed: 30, alt: 6000, shield: 100, roll: 0, pitch: 0,
-                  cam: camPos, field: nil, structs: nil, blips: false)
-            canvas.drawUnicodeCentered("APPROACHING \(next.name.uppercased())",
-                                       y: Int(Float(h) * 0.12), fontSize: 13, 0.85, 0.92, 1.0)
+            spacePanel(canvas, planet: next.name, level: 5, roll: 0, alt: 6000)
+            canvas.drawUnicodeCentered("APPROACHING \(next.name.uppercased())", y: labelY, fontSize: 13, 0.85, 0.92, 1.0)
             save(canvas, "warp-approach")
         }
 
-        // 8 — Enemy codex.
+        // 9 — Enemy codex (Tantalus backdrop).
         do {
-            let canvas = Canvas2D(width: w, height: h, mapSize: size)
-            if let mesh = mesh {
-                mesh.renderInto(canvas.framebuffer, camera: gameCam, entities: entities(field, cam: camPos, size: size))
-            }
-            canvas.drawCodex(time: 0.7)
-            save(canvas, "codex")
+            let s = world(1, seed: 9, alt: 110, pitch: -0.18, bank: 0, count: 12, fire: false)
+            s.canvas.drawCodex(time: 0.7)
+            save(s.canvas, "codex")
         }
 
-        // 9 — Mission briefing.
+        // 10 — Mission briefing (Vesper backdrop).
         do {
-            let canvas = Canvas2D(width: w, height: h, mapSize: size)
-            if let mesh = mesh {
-                mesh.renderInto(canvas.framebuffer, camera: gameCam, entities: entities(field, cam: camPos, size: size))
-            }
-            canvas.drawBriefing(time: 18.0)
-            save(canvas, "briefing")
+            let s = world(5, seed: 5, alt: 110, pitch: -0.18, bank: 0, count: 12, fire: false)
+            s.canvas.drawBriefing(time: 18.0)
+            save(s.canvas, "briefing")
         }
 
-        // 10 — Game over (high-score table).
+        // 11 — Game over (Vulcan) — firefight frozen under the table.
         do {
-            let canvas = Canvas2D(width: w, height: h, mapSize: size)
-            if let mesh = mesh { mesh.renderInto(canvas.framebuffer, camera: gameCam) }
+            let s = world(4, seed: 41, alt: 100, pitch: -0.20, bank: 0, count: 22, fire: true)
             let scores = [
                 HighScoreEntry(name: "ACE",   score: 48250, level: 9, stardate: "20260606::1908"),
                 HighScoreEntry(name: "NOVA",  score: 31100, level: 6, stardate: "20260604::2140"),
@@ -259,8 +289,8 @@ enum Captures {
                 HighScoreEntry(name: "ORBIT", score:  9400, level: 3, stardate: "20260601::1015"),
                 HighScoreEntry(name: "REX",   score:  4200, level: 2, stardate: "20260530::0902"),
             ]
-            canvas.drawGameOver(loseReason: "COLONY OVERRUN", score: 18900, scores: scores, highlight: 2)
-            save(canvas, "game-over")
+            s.canvas.drawGameOver(loseReason: "COLONY OVERRUN", score: 18900, scores: scores, highlight: 2)
+            save(s.canvas, "game-over")
         }
 
         print("✅ \(n) screenshots written")
