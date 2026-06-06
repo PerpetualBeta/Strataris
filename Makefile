@@ -49,7 +49,8 @@ SWIFT_SOURCES    := main.swift \
                     FeatureFlags.swift \
                     SettingsSheet.swift \
                     KeyboardSheet.swift \
-                    OptionsSheet.swift
+                    OptionsSheet.swift \
+                    Captures.swift
 
 PACKAGE_TYPE     := zip
 ALSO_SHIP_PKG    := true

@@ -14,6 +14,13 @@ if ProcessInfo.processInfo.environment["STRATARIS_SMOKE"] != nil {
     exit(0)
 }
 
+// STRATARIS_SHOTS[=dir] → render the doc/marketing screenshots headlessly via
+// the game's real draw path, then exit. World shots need a Metal device.
+if let dir = ProcessInfo.processInfo.environment["STRATARIS_SHOTS"] {
+    Captures.run(outDir: dir)
+    exit(0)
+}
+
 MainActor.assumeIsolated {
     let app = NSApplication.shared
     let delegate = AppDelegate()
