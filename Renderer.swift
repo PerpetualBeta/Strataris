@@ -1514,6 +1514,7 @@ final class Renderer: NSObject, MTKViewDelegate {
                         fwdX: fx, fwdY: fy, rightX: fy, rightY: -fx,
                         enemies: enemies, structures: structures)
         chrono(on: canvas)
+        canvas.warpConsole()          // bend the flat console into its wrap-around arc
         if hasRadialPulse { canvas.drawPulseCharges(pulseCharges) }
         if hasCloak { canvas.drawCloakStatus(active: cloakActive, cooldown: cloakCooldown) }
         if let banner = perkBanner, perkBannerTimer > 0, state != .title, state != .lost {

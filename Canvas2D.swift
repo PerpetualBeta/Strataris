@@ -271,13 +271,29 @@ final class Canvas2D {
     private var dashTopY: Int { height - 56 }       // top edge of the console
     private var dashBayY: Int { dashTopY + 6 }      // top of the instrument bays
     private let dashBayH = 44                        // bay height
-    private let bayInfoX = 6,    bayInfoW = 132      // flight-computer read-out
-    private let bayGaugeX = 144, bayGaugeW = 150     // LED gauges
-    private let attCx = 322                          // artificial-horizon centre x
-    private let bayChronoX = 350, bayChronoW = 72    // chronometer
-    private let radarCx = 450                        // radar centre x
+    // Layout (left → right): info | horizon dial | gauges | radar dial | stardate.
+    // Mirror-symmetric about centre: equal side screens, dials equidistant, the
+    // gauge cluster dead-centre (7px gaps, 6px margins).
+    private let bayInfoX = 6,    bayInfoW = 101      // flight-computer read-out
+    private let attCx = 136                          // artificial-horizon centre x
+    private let bayGaugeX = 165, bayGaugeW = 150     // LED gauges
+    private let radarCx = 344                        // radar centre x
+    private let bayChronoX = 373, bayChronoW = 101   // chronometer / stardate
     private let roundR = 22                           // shared dial radius
     private var roundCy: Int { dashBayY + dashBayH / 2 }
+
+    private var dashHalfW: Float { Float(width) * 0.5 }
+
+    // Perspective console: the flat-drawn dashboard is treated as a section of a
+    // cylinder wrapping around the pilot (vertical axis) and re-projected each
+    // frame by warpConsole(). These per-output-column tables (source column to
+    // sample + projected top/bottom of the band) are derived once from the fixed
+    // cylinder geometry; `consoleScratch` holds the snapshot we sample from.
+    private var perspSrcCol: [Float] = []
+    private var perspYTop: [Float] = []
+    private var perspYBot: [Float] = []
+    private var consoleScratch: [UInt32] = []
+    private var perspBuilt = false
 
     private let dashScreenBG = packRGBA(8, 17, 12)
     private let dashGreen = packRGBA(120, 255, 160)
@@ -343,16 +359,22 @@ final class Canvas2D {
         let W = width, H = height
         let dashTop = dashTopY
 
-        // Console panel: dark brushed-metal gradient with a faint speckle.
-        for y in dashTop..<H {
-            let t = Float(y - dashTop) / Float(H - dashTop)
-            let row = y * width
-            for x in 0..<W {
+        // Console panel: dark brushed-metal gradient with a faint speckle, drawn
+        // FLAT here — the whole console (panel + bays + readouts + dials) is bent
+        // into its wrap-around arc afterwards by warpConsole(), as one continuous
+        // surface, so every instrument flows with the curve. The metal darkens
+        // toward the edges as the surface turns away.
+        let denomBody = Float(H - dashTop)
+        for x in 0..<W {
+            let nx = (Float(x) - dashHalfW) / dashHalfW
+            let edge = -7 * nx * nx
+            for y in dashTop..<H {
+                let t = Float(y - dashTop) / denomBody
                 let h = (UInt32(x) &* 73_856_093) ^ (UInt32(y) &* 19_349_663)
-                let n = Float(h & 3) - 1.5
-                framebuffer[row + x] = packRGBA(UInt8(max(0, min(255, 56 - 26 * t + n))),
-                                                UInt8(max(0, min(255, 60 - 28 * t + n))),
-                                                UInt8(max(0, min(255, 74 - 34 * t + n))))
+                let n = Float(h & 3) - 1.5 + edge
+                framebuffer[y * width + x] = packRGBA(UInt8(max(0, min(255, 56 - 26 * t + n))),
+                                                      UInt8(max(0, min(255, 60 - 28 * t + n))),
+                                                      UInt8(max(0, min(255, 74 - 34 * t + n))))
             }
         }
         fillRect(0, dashTop - 1, W, 1, packRGBA(8, 8, 12))        // seam shadow
@@ -393,6 +415,87 @@ final class Canvas2D {
 
         // Bay 5 — radar dial (scope drawn by drawRadar afterwards).
         dashDial(cx: radarCx, cy: roundCy, r: roundR)
+    }
+
+    // Cylinder geometry (tunable). The pilot sits at the CENTRE of curvature, so
+    // the dashboard wraps around and the side panels come TOWARD the pilot —
+    // magnified and rising — rather than receding. `perspPhi` is the wrap half-
+    // angle (bigger = more wrap); the vertical vanishing line sits at the screen
+    // bottom, so the bottom edge stays anchored while the top arcs up.
+    private let perspPhi: Float = 0.60
+
+    private func buildPerspectiveTable() {
+        let W = width, H = height
+        let srcTop = Float(dashTopY - 1)                 // top of the flat console (seam row)
+        let cxv = dashHalfW, halfW = dashHalfW
+        let cyv = Float(H)                               // vanishing line at the screen bottom
+        let phi = perspPhi, tanPhi = tanf(phi)
+
+        perspSrcCol = [Float](repeating: 0, count: W)
+        perspYTop = [Float](repeating: 0, count: W)
+        perspYBot = [Float](repeating: 0, count: W)
+        for x in 0..<W {
+            let nx = (Float(x) - cxv) / halfW            // projected screen-x, -1 … 1
+            let a = atanf(nx * tanPhi)                   // cylinder angle for this column
+            let s = 1 / cosf(a)                          // ≥1: edges magnified (come toward pilot)
+            perspSrcCol[x] = cxv + (a / phi) * halfW     // source (flat) column
+            perspYTop[x] = cyv + (srcTop - cyv) * s      // top arcs up at the edges
+            perspYBot[x] = cyv + (Float(H) - cyv) * s    // bottom (= H at centre, stays ~anchored)
+        }
+        consoleScratch = [UInt32](repeating: 0, count: W * (H - (dashTopY - 1)))
+        perspBuilt = true
+    }
+
+    @inline(__always)
+    private func sampleScratch(_ fx: Float, _ fy: Float, _ bandH: Int) -> UInt32 {
+        let W = width
+        let x0 = max(0, min(W - 1, Int(fx))), x1 = min(W - 1, x0 + 1)
+        let y0 = max(0, min(bandH - 1, Int(fy))), y1 = min(bandH - 1, y0 + 1)
+        let tx = max(0, fx - Float(Int(fx))), ty = max(0, fy - Float(Int(fy)))
+        let c00 = consoleScratch[y0 * W + x0], c10 = consoleScratch[y0 * W + x1]
+        let c01 = consoleScratch[y1 * W + x0], c11 = consoleScratch[y1 * W + x1]
+        @inline(__always) func ch(_ c: UInt32, _ s: UInt32) -> Float { Float((c >> s) & 0xFF) }
+        @inline(__always) func mix(_ s: UInt32) -> Float {
+            let top = ch(c00, s) * (1 - tx) + ch(c10, s) * tx
+            let bot = ch(c01, s) * (1 - tx) + ch(c11, s) * tx
+            return top * (1 - ty) + bot * ty
+        }
+        return packRGBA(UInt8(mix(0)), UInt8(mix(8)), UInt8(mix(16)))
+    }
+
+    /// Re-project the flat-drawn console as a perspective curved surface: the
+    /// sides recede (horizontal compression + vertical foreshortening) and the
+    /// top edge arcs up, sub-pixel anti-aliased against the view. Call AFTER all
+    /// console elements are drawn (drawCockpit + drawRadar + drawChronometer);
+    /// the upper-screen HUD sits above the band and is untouched.
+    func warpConsole() {
+        let W = width, H = height
+        let srcTop = dashTopY - 1
+        let bandH = H - srcTop
+        if !perspBuilt { buildPerspectiveTable() }
+
+        // Snapshot the flat console band, then re-project from the snapshot.
+        for y in 0..<bandH {
+            let frow = (srcTop + y) * W, srow = y * W
+            for x in 0..<W { consoleScratch[srow + x] = framebuffer[frow + x] }
+        }
+        let spanScale = Float(bandH - 1)
+        for x in 0..<W {
+            let sc = perspSrcCol[x], yt = perspYTop[x], yb = perspYBot[x]
+            let span = max(0.001, yb - yt)
+            for y in max(0, Int(yt))..<H {
+                let fy = Float(y)
+                let cov = fy + 1 - yt                     // sub-pixel coverage of the top edge
+                if cov <= 0 { continue }
+                let v = max(0, min(1, (fy - yt) / span)) * spanScale
+                let col = sampleScratch(sc, v, bandH)
+                if cov < 1 {
+                    blendPixel(x, y, col, cov)             // feather the top edge over the view
+                } else {
+                    framebuffer[y * W + x] = col
+                }
+            }
+        }
     }
 
     /// Artificial horizon: sky/ground split by a line that banks with roll and
