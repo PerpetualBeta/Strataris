@@ -1502,6 +1502,15 @@ final class Renderer: NSObject, MTKViewDelegate {
             canvas.drawCrosshair(x: RenderConfig.crosshairX, y: RenderConfig.crosshairY)
         }
 
+        // Powerup HUD: projected onto the canopy glass, so it's drawn BEFORE the
+        // struts — the solid frame then passes in front of it (occluding where
+        // they cross) rather than the text sitting on top of the structure.
+        if hasRadialPulse { canvas.drawPulseCharges(pulseCharges) }
+        if hasCloak { canvas.drawCloakStatus(active: cloakActive, cooldown: cloakCooldown) }
+        if let banner = perkBanner, perkBannerTimer > 0, state != .title, state != .lost {
+            canvas.drawNotification(banner, t: perkBannerTimer)
+        }
+
         canvas.drawCanopyStruts()
         canvas.drawCockpit(score: combat.score,
                           basesStanding: structures.standing,
@@ -1523,11 +1532,6 @@ final class Renderer: NSObject, MTKViewDelegate {
                         enemies: enemies, structures: structures)
         chrono(on: canvas)
         canvas.warpConsole()          // bend the flat console into its wrap-around arc
-        if hasRadialPulse { canvas.drawPulseCharges(pulseCharges) }
-        if hasCloak { canvas.drawCloakStatus(active: cloakActive, cooldown: cloakCooldown) }
-        if let banner = perkBanner, perkBannerTimer > 0, state != .title, state != .lost {
-            canvas.drawNotification(banner, t: perkBannerTimer)
-        }
 
         if paused && state == .playing {
             canvas.drawBanner(title: "PAUSED", subtitle: "PRESS P TO RESUME")
