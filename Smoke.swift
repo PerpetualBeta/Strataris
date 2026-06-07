@@ -23,8 +23,6 @@ final class SmokeField {
 
     init(terrain: Terrain) { self.terrain = terrain }
 
-    func clear() { particles.removeAll() }
-
     /// A radial debris burst (flying embers + smoke puffs) for a destroyed craft.
     func burst(x: Float, y: Float, z: Float, big: Bool) {
         let embers = big ? 48 : 26

@@ -17,18 +17,6 @@ final class ProjectileField {
     private(set) var shots: [Projectile] = []
     private let speed: Float = 200
 
-    func spawn(fromX: Float, fromY: Float, fromZ: Float,
-               targetX: Float, targetY: Float, targetZ: Float, rng: inout UInt32) {
-        let dx = targetX - fromX, dy = targetY - fromY, dz = targetZ - fromZ
-        let d = max(1, sqrtf(dx * dx + dy * dy + dz * dz))
-        let spread: Float = 0.06        // slight inaccuracy so a moving player can dodge
-        let nx = dx / d + (pfRand(&rng) - 0.5) * spread
-        let ny = dy / d + (pfRand(&rng) - 0.5) * spread
-        let nz = dz / d + (pfRand(&rng) - 0.5) * spread
-        shots.append(Projectile(x: fromX, y: fromY, z: fromZ,
-                                vx: nx * speed, vy: ny * speed, vz: nz * speed, ttl: 3.5))
-    }
-
     /// Fire along an explicit direction (forward guns, freefall bombs).
     func spawnDirected(fromX: Float, fromY: Float, fromZ: Float,
                        dirX: Float, dirY: Float, dirZ: Float, speedScale: Float = 1) {
@@ -58,9 +46,4 @@ final class ProjectileField {
         shots = kept
         return hits
     }
-}
-
-private func pfRand(_ s: inout UInt32) -> Float {
-    s = s &* 1_664_525 &+ 1_013_904_223
-    return Float((s >> 8) & 0xFFFF) / Float(0xFFFF)
 }

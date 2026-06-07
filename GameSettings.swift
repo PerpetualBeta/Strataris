@@ -20,7 +20,6 @@ final class GameSettings {
         static let invertPitch = "invertPitch"
         static let deadzone    = "deadzone"
         static let fireConfirms = "fireConfirms"
-        static let leftWarp    = "leftWarp"
         static let padBindings = "padBindings"
         static let keyBindings = "keyBindings"
         static let trimAgility   = "trimAgility"
@@ -37,7 +36,6 @@ final class GameSettings {
             Key.invertPitch: false,
             Key.deadzone:    0.25,
             Key.fireConfirms: true,
-            Key.leftWarp:    true,
             Key.trimAgility:   1.0,
             Key.trimYaw:       1.0,
             Key.trimAutoLevel: 1.0,
@@ -54,7 +52,6 @@ final class GameSettings {
     var invertPitch: Bool  { get { d.bool(forKey: Key.invertPitch) }  set { d.set(newValue, forKey: Key.invertPitch) } }
     var deadzone: Float    { get { d.float(forKey: Key.deadzone) }    set { d.set(newValue, forKey: Key.deadzone) } }
     var fireConfirms: Bool { get { d.bool(forKey: Key.fireConfirms) } set { d.set(newValue, forKey: Key.fireConfirms) } }
-    var leftWarp: Bool     { get { d.bool(forKey: Key.leftWarp) }     set { d.set(newValue, forKey: Key.leftWarp) } }
 
     // Flight envelope trim — multipliers on the 6DOF handling rates (1 = the
     // tuned defaults). Agility scales pitch/roll, yaw scales the full-envelope

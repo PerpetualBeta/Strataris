@@ -18,8 +18,6 @@ struct Camera {
     var pitch: Float = 0       // eased nose tip (drives the attitude dial)
 
     var speed: Float = 90      // forward units/sec
-    let minSpeed: Float = 20
-    let maxSpeed: Float = 280
 
     static func start(over terrain: Terrain) -> Camera {
         Camera(x: 512, y: 512, height: terrain.heightF(512, 512) + 140, angle: 0)

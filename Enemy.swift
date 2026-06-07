@@ -44,7 +44,6 @@ struct Enemy {
 final class EnemyField {
     private(set) var enemies: [Enemy] = []
     let difficulty: Float
-    let meshes: [EnemyKind: Mesh]
 
     private let terrain: Terrain
     private var fieldRng: UInt32
@@ -64,13 +63,6 @@ final class EnemyField {
         self.difficulty = difficulty
         self.fieldRng = seed ^ 0xA5A5_1234
         self.motherTimer = 40 + Float((seed >> 8) & 0xFF) / 255 * 30   // first mothership ~40–70 s
-
-        var m = [EnemyKind: Mesh]()
-        m[.destroyer]  = Mesh.destroyer()
-        m[.fighter]    = Mesh.fighter()
-        m[.drone]      = Mesh.drone()
-        m[.mothership] = Mesh.mothership()
-        meshes = m
 
         var seedState = seed
         func rnd() -> Float {
@@ -120,8 +112,6 @@ final class EnemyField {
         case .mothership: return 62
         }
     }
-
-    func mesh(for kind: EnemyKind) -> Mesh { meshes[kind]! }
 
     var remaining: Int { enemies.count }
 

@@ -3,9 +3,9 @@
 // No sound assets — everything is synthesised in code, which suits the retro
 // aesthetic. An AVAudioSourceNode pulls from a small voice pool; the game
 // thread triggers one-shot SFX (each a waveform with a frequency slide and an
-// attack/decay envelope), voice 0 is a sustained engine hum, and the title
-// screen drives a gentle arpeggio through `note()`. All mixing happens in the
-// render callback on the audio thread, guarded by a heap-stable lock.
+// attack/decay envelope), and voice 0 is a sustained engine hum. All mixing
+// happens in the render callback on the audio thread, guarded by a heap-stable
+// lock.
 
 import AVFoundation
 import os
@@ -329,14 +329,6 @@ final class AudioEngine {
         ambientEventCountdown = Float.random(in: p.eventRange)
     }
 
-    /// Stop and forget the ambience (snap to silence; call on a hard reset).
-    func clearAmbient() {
-        os_unfair_lock_lock(lock)
-        for i in 0..<AudioEngine.ambientVoiceCount { voices[AudioEngine.ambientVoice0 + i].active = false }
-        os_unfair_lock_unlock(lock)
-        ambientProfile = nil; ambientName = ""; ambientFade = 0
-    }
-
     /// Per-frame ambient driver (game thread; call for EVERY state). `active` is
     /// the target presence: the bus ramps toward full while active (on a planet,
     /// or descending on arrival) and toward silence otherwise (warp-out, title,
@@ -389,9 +381,6 @@ final class AudioEngine {
 
     // MARK: SFX presets
 
-    func note(freq: Float, dur: Float, amp: Float, wave: Int) {
-        trigger(wave: wave, f0: freq, f1: freq, dur: dur, amp: amp, attack: 0.008)
-    }
     func playerShot()   { trigger(wave: AudioEngine.saw,    f0: 880, f1: 170, dur: 0.10, amp: 0.20) }
     func enemyShot()    { trigger(wave: AudioEngine.square, f0: 500, f1: 260, dur: 0.10, amp: 0.13) }
     func bomb()         { trigger(wave: AudioEngine.sine, f0: 720, f1: 130, dur: 0.5, amp: 0.13) }   // falling whistle

@@ -30,7 +30,6 @@ SWIFT_SOURCES    := main.swift \
                     Terrain.swift \
                     Camera.swift \
                     InputState.swift \
-                    Sprite.swift \
                     Mesh.swift \
                     Enemy.swift \
                     Structure.swift \

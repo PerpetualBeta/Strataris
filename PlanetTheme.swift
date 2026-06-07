@@ -54,9 +54,6 @@ struct PlanetTheme {
                     veg: (114, 84, 146), rock: (92, 80, 112), peak: (214, 202, 228)),
     ]
 
-    /// The number of distinct worlds in the cluster.
-    static var count: Int { all.count }
-
     /// Map a (1-based) level onto its planet in the cluster — cycles endlessly.
     static func forPlanet(_ n: Int) -> PlanetTheme {
         let i = ((n - 1) % all.count + all.count) % all.count

@@ -319,11 +319,8 @@ final class MeshTerrainRenderer {
     // window gives seamless, edgeless terrain in every direction.
     private var terrain: Terrain            // swapped on warp via setTerrain (pipelines reused)
     private let patchN: Int                 // cells per side
-    private let vertsPerSide: Int           // patchN + 1
     private let recenterStep: Int           // rebuild once the camera drifts this many cells
     private(set) var cellStride = 1         // world units per cell — grows with altitude (LOD)
-    /// World half-extent of the patch (for fog/far tuning); scales with stride.
-    var worldHalf: Float { Float(patchN / 2 * cellStride) }
     /// The fog far-distance from the last encoded frame — beyond it, craft have
     /// faded into the haze (used by the attract demo to only engage visible craft).
     private(set) var fogFarDistance: Float = 2600
@@ -452,7 +449,6 @@ final class MeshTerrainRenderer {
         self.height = height
         self.terrain = terrain
         self.patchN = patchCells
-        self.vertsPerSide = patchCells + 1
         // Recenter often enough that the patch edge always stays beyond the fog
         // (worldHalf - drift > fog end), so the seam never peeks out — new terrain
         // is born fully fogged and fades in rather than popping.

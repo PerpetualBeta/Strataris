@@ -77,31 +77,6 @@ final class StructureField {
 
     var standing: Int { structures.reduce(0) { $0 + ($1.alive ? 1 : 0) } }
 
-    /// Restore the terrain under every structure to pristine (used on restart).
-    func restoreAll() {
-        for s in structures { terrain.restore(s.originalStamp) }
-    }
-
-    private static func clampU8(_ v: Float) -> UInt8 { UInt8(min(255, max(0, v))) }
-
-    /// Footprint look by remaining health: clean bright concrete (pristine) →
-    /// charred and shrinking → glowing red-hot when critical → low dark rubble
-    /// at zero. A wide colour swing (not just a height nudge) so the damage
-    /// state reads clearly from the air.
-    static func stageLook(health: Int, maxHealth: Int) -> (wall: Float, body: (UInt8, UInt8, UInt8)) {
-        if health <= 0 { return (8, (52, 44, 40)) }                 // rubble
-        let f = max(0, min(1, Float(health) / Float(maxHealth)))    // 1 pristine … 0 dead
-        let wall = 20 + f * 30                                       // ~50 → ~22 as it crumbles
-        var r = 70 + (195 - 70) * f                                 // charred → clean grey
-        var g = 56 + (200 - 56) * f
-        var b = 50 + (210 - 50) * f
-        if f < 0.4 {                                                // ember glow when badly hurt
-            let e = (0.4 - f) / 0.4
-            r += e * 95; g -= e * 12; b -= e * 16
-        }
-        return (wall, (clampU8(r), clampU8(g), clampU8(b)))
-    }
-
     /// Apply damage: drop health, re-stamp the footprint to its new state
     /// (restoring pristine ground first so damage stages don't compound), and
     /// retire the structure at zero. Returns true if this hit destroyed it.
