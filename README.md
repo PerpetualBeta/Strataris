@@ -57,6 +57,9 @@ floppy is exactly as impossible as it was in 1995.)
   are a finite, *named* cluster (Demeter, Tantalus, Boreas, Pandora, Vulcan,
   Vesper), cycled endlessly; your **level** climbs forever and is the mark of
   progression.
+- **Earn upgrades.** As your level climbs you unlock combat perks, kept from
+  then on: full six-degrees-of-freedom flight (level 3), an auto-targeting
+  computer (6), a cloaking device (9), and a screen-clearing radial pulse (12).
 - **Cockpit dashboard.** A cohesive instrument panel: flight computer readout,
   LED shield/throttle gauges, an artificial horizon, a chronometer/stardate,
   and a sweeping radar scope tracking surviving craft.
@@ -90,19 +93,24 @@ open .build/Strataris.app   # fly
 | **↑ / ↓** | climb / dive |
 | **+ / −** | throttle |
 | **Space** | fire |
+| **Z** | cloaking device (once unlocked) |
+| **X** | radial pulse (once unlocked) |
 | **R** / **Return** | start · restart · warp (on the cleared-planet screen) |
 | **P** | pause |
 | **M** | mute |
 | **B** / **V** | mission briefing / enemy intel (from the title) |
 | **Esc** | back (close briefing/codex) |
-| **C** | controller setup |
-| **⌘,** | settings (audio, controls, reset scores) |
+| **C** / **K** | controller / keyboard setup |
+| **⌘,** | settings (audio, flight prefs, reset scores) |
 | **⌘Q** | quit |
+
+Every key is **reconfigurable** from the Keyboard sheet (**K**); the bindings
+above are just the defaults.
 
 A connected game controller (Xbox / DualShock / any Extended Gamepad) is
 detected automatically; the left stick steers/pitches and the discrete actions
-(fire, throttle, pause, warp) are **rebindable** from the controller sheet.
-Keyboard always works as a fallback.
+(fire, throttle, pause, warp, cloak, pulse) are **rebindable** from the
+controller sheet. Keyboard always works as a fallback.
 
 ### Hidden feature flags
 
@@ -128,39 +136,10 @@ to fill the window.
 
 ## Architecture
 
-The world is a GPU triangle-mesh terrain (`MeshTerrain.swift`) rendered from a
-quaternion camera (`Camera6DOF`) into a 480×270 offscreen texture, then read
-back into a 2D packed-RGBA canvas (`Canvas2D.swift`) where the HUD, cutscenes,
-codex and text composite on top. A runtime-compiled Metal blit shader uploads
-that canvas and upscales it nearest-neighbour to the drawable.
-
-| File | Role |
-|------|------|
-| `main.swift` | Entry point; smoke-test vs GUI launch |
-| `AppDelegate.swift` | Window (maximised), menu bar, About, Sparkle, input wiring |
-| `GameView.swift` | `MTKView` subclass; keyboard capture + rebinding |
-| `Renderer.swift` | Game-state machine, frame loop, Metal present + blit shader |
-| `MeshTerrain.swift` | GPU mesh-terrain renderer + `Camera6DOF` quaternion flight camera |
-| `Canvas2D.swift` | 2D canvas: HUD/dashboard, radar, cutscenes, codex, screens, headless `SmokeTest` |
-| `Terrain.swift` | Procedural heightmap/colourmap generation + sampling |
-| `PlanetTheme.swift` | The named planet cluster (palettes per world) |
-| `Camera.swift` | Legacy scalar bridge (HUD/radar/AI/audio), written from `Camera6DOF` |
-| `InputState.swift` | Effective input (keyboard OR'd with gamepad) |
-| `Gamepad.swift` | Controller polling + rebindable action map |
-| `Mesh.swift` | Low-poly ship & building meshes (flat-shaded solids) |
-| `Enemy.swift` | Enemy field, kinds, AI, points |
-| `Structure.swift` | Ground installations + damage stages |
-| `Combat.swift` / `Projectile.swift` | Fire, bombs, hit detection, scoring |
-| `Smoke.swift` | Particle smoke/fire |
-| `Sprite.swift` | Billboard sprites with terrain depth-test |
-| `Font.swift` / `TextImage.swift` | 5×7 bitmap font / Core Text rasteriser |
-| `AudioEngine.swift` | Code synthesiser (music + SFX buses) |
-| `VoiceComms.swift` | Radio voice callouts |
-| `HighScores.swift` | Persistent high-score table |
-| `GameSettings.swift` | UserDefaults-backed settings (volumes, controls, binds) |
-| `FeatureFlags.swift` | Hidden `defaults write` feature flags |
-| `OptionsSheet.swift` / `SettingsSheet.swift` | Options / controller sheets |
-| `generate_icon.swift` | Build-time app-icon generator (not compiled in) |
+The world is a GPU triangle-mesh terrain composited with a hand-built 2D
+cockpit/HUD, then blit-upscaled nearest-neighbour for the pixelated look. See
+**[ARCHITECTURE.md](ARCHITECTURE.md)** for the rendering pipeline and a per-file
+source map.
 
 ## Support
 
