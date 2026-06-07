@@ -145,6 +145,11 @@ source map.
 
 If you enjoy Strataris, you can [**buy me a coffee**](https://jorviksoftware.cc/donate) ☕ — it keeps the Jorvik lights on.
 
+## License
+
+Released into the public domain under [The Unlicense](LICENSE) — do whatever
+you like with it.
+
 ---
 
 *A Jorvik Software game.*
