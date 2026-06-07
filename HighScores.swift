@@ -70,7 +70,12 @@ final class HighScores {
     private func load() {
         guard let data = try? Data(contentsOf: url),
               let decoded = try? JSONDecoder().decode([HighScoreEntry].self, from: data) else { return }
-        entries = decoded.sorted { $0.score > $1.score }
+        // Cap name length on load too (not just on `add`), so a hand-edited
+        // highscores.json can't carry an unbounded name into the renderer.
+        entries = decoded
+            .map { HighScoreEntry(name: String($0.name.prefix(32)), score: $0.score,
+                                  level: $0.level, stardate: $0.stardate) }
+            .sorted { $0.score > $1.score }
     }
 
     private func save() {
