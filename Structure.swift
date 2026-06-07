@@ -15,12 +15,13 @@ import Foundation
 struct Structure {
     var x: Float
     var y: Float
-    var half: Int            // footprint half-width in world cells
-    var roofHeight: Float
+    var half: Int            // footprint half-width in world cells (also the model scale)
+    var roofHeight: Float    // world z of the model top (smoke/explosion origin)
+    var kind: BuildingKind   // which 3D installation model
     var health: Int
     var alive: Bool
     var damageCooldown: Float = 0      // rate-limits incoming damage, so a swarm can't delete it
-    var originalStamp: Terrain.Stamp   // pristine heightfield, restored before each re-stamp
+    var originalStamp: Terrain.Stamp   // pristine heightfield under the pad, restored on cleanup
 }
 
 final class StructureField {
@@ -38,6 +39,8 @@ final class StructureField {
         }
 
         let half = 26
+        let kinds: [BuildingKind] = [.tower, .dome, .bunker, .hab, .spire]   // varied silhouettes
+        let pad: (UInt8, UInt8, UInt8) = (120, 124, 132)                     // concrete apron
         let minSeparation: Float = 280
         var tries = 0
         while structures.count < count && tries < 500 {
@@ -57,12 +60,15 @@ final class StructureField {
             let (lo, hi) = terrain.heightRange(centerX: sx, centerY: sy, half: half)
             if hi - lo > 24 { continue }                                      // flat-ish
 
-            let look = StructureField.stageLook(health: maxHealth, maxHealth: maxHealth)
+            // Flatten a low concrete pad (no tall walls — the building itself is a
+            // 3D model placed on top), so it's founded and reads as built ground.
+            let kind = kinds[structures.count % kinds.count]
             let stamp = terrain.stampStructure(centerX: sx, centerY: sy, half: half,
-                                               wallHeight: look.wall, body: look.body)
+                                               wallHeight: 3, body: pad)
+            let padTop = terrain.heightF(sx, sy)
             structures.append(Structure(x: sx, y: sy, half: half,
-                                        roofHeight: terrain.heightF(sx, sy),
-                                        health: maxHealth, alive: true, originalStamp: stamp))
+                                        roofHeight: padTop + Mesh.buildingTopZ(kind) * Float(half),
+                                        kind: kind, health: maxHealth, alive: true, originalStamp: stamp))
         }
     }
 
@@ -109,14 +115,9 @@ final class StructureField {
         if structures[index].damageCooldown > 0 { return false }   // rate-limited — a swarm can't stack hits
         structures[index].damageCooldown = damageInterval
         structures[index].health -= amount
-        let h = max(0, structures[index].health)
-        let s = structures[index]
-        terrain.restore(s.originalStamp)
-        let look = StructureField.stageLook(health: h, maxHealth: maxHealth)
-        terrain.stampStructure(centerX: s.x, centerY: s.y, half: s.half,
-                               wallHeight: look.wall, body: look.body)
-        structures[index].roofHeight = terrain.heightF(s.x, s.y)
-        if h <= 0 {
+        // The damage look (charring → rubble) is the building model's tint/state,
+        // applied at render time from `health`; no heightfield re-stamp.
+        if structures[index].health <= 0 {
             structures[index].alive = false
             return true
         }

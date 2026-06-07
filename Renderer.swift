@@ -658,6 +658,33 @@ final class Renderer: NSObject, MTKViewDelegate {
         }
     }
 
+    /// Colony installations as 3D model instances for the GPU pass: each placed
+    /// on its pad, scaled by its footprint, with a per-structure yaw for variety
+    /// and a damage tint (clean → charred ember; destroyed → rubble model).
+    private func structureInstances(_ field: StructureField, _ terr: Terrain,
+                                    around cam: SIMD3<Float>) -> [BuildingInstance] {
+        let size = Float(terr.size), halfS = size * 0.5
+        func wrap(_ v: Float, _ c: Float) -> Float {
+            var d = (v - c).truncatingRemainder(dividingBy: size)
+            if d > halfS { d -= size } else if d < -halfS { d += size }
+            return c + d
+        }
+        return field.structures.map { st in
+            let padZ = terr.heightF(st.x, st.y)
+            let s = Float(st.half)
+            let yaw = Float((Int(st.x) ^ Int(st.y)) & 7) * 0.18
+            let cs = cosf(yaw), sn = sinf(yaw)
+            let m = simd_float4x4(columns: (
+                SIMD4<Float>(cs * s, sn * s, 0, 0), SIMD4<Float>(-sn * s, cs * s, 0, 0),
+                SIMD4<Float>(0, 0, s, 0), SIMD4<Float>(wrap(st.x, cam.x), wrap(st.y, cam.y), padZ, 1)))
+            if !st.alive { return (kind: .rubble, model: m, tint: SIMD4<Float>(1, 1, 1, 0)) }
+            let f = max(0, min(1, Float(st.health) / Float(field.maxHealth)))
+            let charred = SIMD3<Float>(0.85, 0.45, 0.38)
+            let t = charred + (SIMD3<Float>(1, 1, 1) - charred) * f
+            return (kind: st.kind, model: m, tint: SIMD4<Float>(t.x, t.y, t.z, 0))   // w=0 → opaque
+        }
+    }
+
     /// Map the live effect state to camera-facing billboards for the 3D pass:
     /// explosions (additive core + glow), smoke (alpha) / embers (additive), and
     /// enemy bolts / falling bombs (additive).
@@ -900,7 +927,8 @@ final class Renderer: NSObject, MTKViewDelegate {
                 let pos = SIMD3<Float>(warpCam.x, warpCam.y, warpCam.height)
                 let c6 = Camera6DOF.restricted(position: pos, heading: warpCam.angle,
                                                pitch: 0.45 * (1 - p), bank: 0, speed: 260)
-                mesh.renderInto(canvas.framebuffer, camera: c6)
+                mesh.renderInto(canvas.framebuffer, camera: c6,
+                                structures: structureInstances(ns, nt, around: pos))
                 canvas.dimScreen(p < 0.3 ? (0.3 - p) / 0.3 : 0)
                 panel(canvas, warpCam, ns, ne, nt, blips: true)
                 canvas.drawUnicodeCentered("\(PlanetTheme.name(forLevel: level).uppercased())   ·   LEVEL \(level)", y: labelY, fontSize: 14, 0.85, 0.92, 1.0)
@@ -1140,7 +1168,8 @@ final class Renderer: NSObject, MTKViewDelegate {
         updateAttractDemo(dt: step, cam: c6)
 
         mesh.recenterIfNeeded(around: pos)
-        mesh.renderInto(canvas.framebuffer, camera: c6, entities: demoEntities(), fx: demoFX())
+        mesh.renderInto(canvas.framebuffer, camera: c6, entities: demoEntities(),
+                        structures: structureInstances(structures, terrain, around: pos), fx: demoFX())
 
         // The demo "pilot" firing — laser bolts converging on the targeted craft
         // (or the reticle point if the lock just cleared).
@@ -1479,7 +1508,9 @@ final class Renderer: NSObject, MTKViewDelegate {
         // 2D over it.
         mesh.recenterIfNeeded(around: camera6.position)
         mesh.renderInto(canvas.framebuffer, camera: camera6,
-                        entities: meshEntities(), fx: meshFX())
+                        entities: meshEntities(),
+                        structures: structureInstances(structures, terrain, around: camera6.position),
+                        fx: meshFX())
         // Targeting computer: red dotted box around the locked craft.
         if hasTargetingComputer, let li = targetLockId.flatMap({ enemies.index(forId: $0) }),
            let p = meshProject(enemyAt: li) {

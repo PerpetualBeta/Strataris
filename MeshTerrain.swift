@@ -257,7 +257,12 @@ private struct EntityUniforms {
     var eye: SIMD4<Float>          // camera position (fog distance)
     var light: SIMD4<Float>        // world light direction
     var fog: SIMD4<Float>          // x = near, y = far
+    var tint: SIMD4<Float>         // per-instance colour multiply (damage state); white = unchanged
 }
+
+/// A colony installation to draw: which model, where (world transform), and a
+/// colour multiply for its damage state.
+typealias BuildingInstance = (kind: BuildingKind, model: simd_float4x4, tint: SIMD4<Float>)
 
 private struct BillboardVertex {
     var center: SIMD3<Float>       // center @0, (cornerX, cornerY, size) @16, colour @32 — stride 48
@@ -296,6 +301,7 @@ final class MeshTerrainRenderer {
     private let skyDepth: MTLDepthStencilState         // always + no write
     private let fxDepth: MTLDepthStencilState          // less + NO write (occluded, but don't occlude)
     private var entityBuffers: [EnemyKind: (buf: MTLBuffer, count: Int)] = [:]
+    private var buildingBuffers: [BuildingKind: (buf: MTLBuffer, count: Int)] = [:]
     private var fxBufs: [MTLBuffer]                    // pooled per-frame billboard verts
     private var fxBufIndex = 0
     private let fxCapacityVerts = 4096                 // ~680 billboards/frame
@@ -357,9 +363,9 @@ final class MeshTerrainRenderer {
 
     // Lit, flat-shaded craft (enemies). Per-face normals → faceted look; shading
     // rotates with the craft. Fades with distance like the terrain.
-    struct EntU { float4x4 vp; float4x4 model; float4 eye; float4 light; float4 fog; };
+    struct EntU { float4x4 vp; float4x4 model; float4 eye; float4 light; float4 fog; float4 tint; };
     struct EVIn  { float3 pos [[attribute(0)]]; float3 nrm [[attribute(1)]]; float4 col [[attribute(2)]]; };
-    struct EVOut { float4 position [[position]]; float3 shaded; float fogT; };
+    struct EVOut { float4 position [[position]]; float3 shaded; float fogT; float fade; };
 
     vertex EVOut v_entity(EVIn in [[stage_in]], constant EntU& u [[buffer(1)]]) {
         float4 wp = u.model * float4(in.pos, 1.0);
@@ -368,13 +374,14 @@ final class MeshTerrainRenderer {
         float d = max(0.0, dot(n, normalize(u.light.xyz)));
         EVOut o;
         o.position = u.vp * wp;
-        o.shaded = in.col.rgb * (0.45 + 0.55 * d);
+        o.shaded = in.col.rgb * u.tint.rgb * (0.45 + 0.55 * d);
         float dist = distance(wp.xyz, u.eye.xyz);
         o.fogT = clamp((dist - u.fog.x) / max(1.0, u.fog.y - u.fog.x), 0.0, 1.0);
+        o.fade = u.tint.w;   // 1 = fade with distance (craft); 0 = stay opaque (buildings)
         return o;
     }
     fragment float4 f_entity(EVOut in [[stage_in]]) {
-        return float4(in.shaded, 1.0 - in.fogT);
+        return float4(in.shaded, 1.0 - in.fogT * in.fade);
     }
 
     // Camera-facing billboard (effects): the quad corner is offset along the
@@ -614,6 +621,12 @@ final class MeshTerrainRenderer {
                 entityBuffers[kind] = eb
             }
         }
+        // Per-type colony installation meshes → GPU buffers (built once).
+        for bk in BuildingKind.allCases {
+            if let eb = MeshTerrainRenderer.buildEntityBuffer(device: device, mesh: Mesh.building(bk)) {
+                buildingBuffers[bk] = eb
+            }
+        }
     }
 
     /// Expand a Mesh into flat-shaded triangles (one face normal per triangle).
@@ -705,6 +718,7 @@ final class MeshTerrainRenderer {
     /// `fx` are camera-facing effect billboards (depth-tested, blended).
     func encode(camera: Camera6DOF,
                 entities: [(kind: EnemyKind, model: simd_float4x4)] = [],
+                structures: [BuildingInstance] = [],
                 fx: [Billboard] = []) -> MTLCommandBuffer? {
         let aspect = Float(width) / Float(height)
         let view = camera.viewMatrix()
@@ -779,14 +793,25 @@ final class MeshTerrainRenderer {
         enc.drawIndexedPrimitives(type: .triangle, indexCount: indexCount,
                                   indexType: .uint32, indexBuffer: ibuf, indexBufferOffset: 0)
 
-        // Craft (depth-tested, lit, distance-faded).
-        if !entities.isEmpty {
+        // Craft + colony installations (depth-tested, lit, distance-faded). Both
+        // use the entity pipeline; the per-instance `tint` is white for craft and
+        // the damage colour for buildings.
+        if !entities.isEmpty || !structures.isEmpty {
+            let white = SIMD4<Float>(1, 1, 1, 1)
             var eu = EntityUniforms(vp: vp, model: matrix_identity_float4x4,
                                     eye: SIMD4<Float>(camera.position, 1),
                                     light: SIMD4<Float>(simd_normalize(SIMD3<Float>(-1, 0.35, 0.9)), 0),
-                                    fog: fogP)
+                                    fog: fogP, tint: white)
             enc.setRenderPipelineState(entityPipeline)
             enc.setDepthStencilState(meshDepth)
+            for inst in structures {
+                guard let eb = buildingBuffers[inst.kind] else { continue }
+                eu.model = inst.model; eu.tint = inst.tint
+                enc.setVertexBytes(&eu, length: MemoryLayout<EntityUniforms>.stride, index: 1)
+                enc.setVertexBuffer(eb.buf, offset: 0, index: 0)
+                enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: eb.count)
+            }
+            eu.tint = white
             for (kind, model) in entities {
                 guard let eb = entityBuffers[kind] else { continue }
                 eu.model = model
@@ -893,8 +918,9 @@ final class MeshTerrainRenderer {
     /// (R | G<<8 | B<<16), so the bytes drop in with no conversion.
     func renderInto(_ framebuffer: UnsafeMutablePointer<UInt32>, camera: Camera6DOF,
                     entities: [(kind: EnemyKind, model: simd_float4x4)] = [],
+                    structures: [BuildingInstance] = [],
                     fx: [Billboard] = []) {
-        guard let cmd = encode(camera: camera, entities: entities, fx: fx) else { return }
+        guard let cmd = encode(camera: camera, entities: entities, structures: structures, fx: fx) else { return }
         cmd.commit(); cmd.waitUntilCompleted()
         framebuffer.withMemoryRebound(to: UInt8.self, capacity: width * height * 4) { bytes in
             colorTex.getBytes(bytes, bytesPerRow: width * 4,
@@ -904,8 +930,8 @@ final class MeshTerrainRenderer {
 
     /// Render one frame and read the colour texture back as RGB bytes (headless).
     func renderToRGB(camera: Camera6DOF, entities: [(kind: EnemyKind, model: simd_float4x4)] = [],
-                     fx: [Billboard] = []) -> [UInt8] {
-        guard let cmd = encode(camera: camera, entities: entities, fx: fx) else { return [] }
+                     structures: [BuildingInstance] = [], fx: [Billboard] = []) -> [UInt8] {
+        guard let cmd = encode(camera: camera, entities: entities, structures: structures, fx: fx) else { return [] }
         cmd.commit(); cmd.waitUntilCompleted()
         var rgba = [UInt8](repeating: 0, count: width * height * 4)
         colorTex.getBytes(&rgba, bytesPerRow: width * 4,

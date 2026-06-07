@@ -127,6 +127,28 @@ enum Captures {
             return fx
         }
 
+        // Colony installations as 3D model instances (mirrors Renderer).
+        func buildings(_ field: StructureField, _ terr: Terrain, cam: SIMD3<Float>) -> [BuildingInstance] {
+            let size = Float(terr.size), halfS = size * 0.5
+            func wrap(_ v: Float, _ c: Float) -> Float {
+                var d = (v - c).truncatingRemainder(dividingBy: size)
+                if d > halfS { d -= size } else if d < -halfS { d += size }
+                return c + d
+            }
+            return field.structures.map { st in
+                let padZ = terr.heightF(st.x, st.y), s = Float(st.half)
+                let yaw = Float((Int(st.x) ^ Int(st.y)) & 7) * 0.18, cs = cosf(yaw), sn = sinf(yaw)
+                let m = simd_float4x4(columns: (
+                    SIMD4<Float>(cs * s, sn * s, 0, 0), SIMD4<Float>(-sn * s, cs * s, 0, 0),
+                    SIMD4<Float>(0, 0, s, 0), SIMD4<Float>(wrap(st.x, cam.x), wrap(st.y, cam.y), padZ, 1)))
+                if !st.alive { return (kind: .rubble, model: m, tint: SIMD4<Float>(1, 1, 1, 0)) }
+                let f = max(0, min(1, Float(st.health) / Float(field.maxHealth)))
+                let charred = SIMD3<Float>(0.85, 0.45, 0.38)
+                let t = charred + (SIMD3<Float>(1, 1, 1) - charred) * f
+                return (kind: st.kind, model: m, tint: SIMD4<Float>(t.x, t.y, t.z, 0))
+            }
+        }
+
         func globeColor(_ th: PlanetTheme) -> (Float, Float, Float) {
             ((Float(th.veg.0) + Float(th.water.0)) / 2,
              (Float(th.veg.1) + Float(th.water.1)) / 2,
@@ -156,7 +178,9 @@ enum Captures {
             let cam6 = Camera6DOF.restricted(position: camPos, heading: 0, pitch: pitch, bank: bank, speed: 150)
             let ents = formation(cam: camPos, count: count, terrain: terrain, seed: seed)
             let canvas = Canvas2D(width: w, height: h, mapSize: Float(terrain.size))
-            mesh.renderInto(canvas.framebuffer, camera: cam6, entities: ents, fx: fire ? storm(cam: camPos, ents: ents, seed: seed) : [])
+            mesh.renderInto(canvas.framebuffer, camera: cam6, entities: ents,
+                            structures: buildings(structs, terrain, cam: camPos),
+                            fx: fire ? storm(cam: camPos, ents: ents, seed: seed) : [])
             let field = EnemyField(terrain: terrain, around: 512, cy: 512, count: 26)         // busy radar
             return Scene(canvas: canvas, cam: camPos, theme: theme, field: field, structs: structs,
                          alt: max(0, Int(camPos.z - terrain.heightF(camPos.x, camPos.y))))
