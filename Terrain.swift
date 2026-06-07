@@ -114,6 +114,14 @@ final class Terrain {
 
     @inline(__always) private func clampU8(_ v: Float) -> UInt8 { UInt8(min(255, max(0, v))) }
 
+    @inline(__always)
+    private func lerp3(_ a: (UInt8, UInt8, UInt8), _ b: (UInt8, UInt8, UInt8), _ t: Float) -> (UInt8, UInt8, UInt8) {
+        let u = max(0, min(1, t))
+        return (clampU8(Float(a.0) + (Float(b.0) - Float(a.0)) * u),
+                clampU8(Float(a.1) + (Float(b.1) - Float(a.1)) * u),
+                clampU8(Float(a.2) + (Float(b.2) - Float(a.2)) * u))
+    }
+
     private func baseColor(forHeight h: Float, x: Int, y: Int) -> (UInt8, UInt8, UInt8) {
         if h <= seaLevel {
             // Flat sea: no depth variation after clamping, so add a touch of
@@ -123,12 +131,27 @@ final class Terrain {
             let w = theme.water
             return (clampU8(Float(w.0) + 28 * t), clampU8(Float(w.1) + 28 * t), clampU8(Float(w.2) + 34 * t))
         }
-        switch h {
-        case ..<78:   return theme.beach
-        case ..<140:  return theme.veg
-        case ..<200:  return theme.rock
-        default:      return theme.peak
+        // Land bands with SOFT transitions, so neither the shoreline nor the
+        // band edges read as a hard stair-stepped contour. `smoothstep` windows
+        // straddle each boundary; the chunky flat facets are kept, just the
+        // colour contrast across the boundary is feathered.
+        @inline(__always) func sstep(_ e0: Float, _ e1: Float, _ x: Float) -> Float {
+            let t = max(0, min(1, (x - e0) / (e1 - e0))); return t * t * (3 - 2 * t)
         }
+        let beach = theme.beach, veg = theme.veg, rock = theme.rock, peak = theme.peak
+        var col: (UInt8, UInt8, UInt8)
+        switch h {
+        case ..<86:   col = lerp3(beach, veg,  sstep(74, 90, h))
+        case ..<148:  col = lerp3(veg,   rock, sstep(132, 152, h))
+        case ..<208:  col = lerp3(rock,  peak, sstep(192, 212, h))
+        default:      col = peak
+        }
+        // Wet-sand shore: feather the first few units of land back toward the
+        // water tone so the waterline isn't a hard blue↔sand edge.
+        if h < seaLevel + 7 {
+            col = lerp3(theme.water, col, sstep(seaLevel, seaLevel + 7, h))
+        }
+        return col
     }
 
     // MARK: Structures (stamped into the heightfield, so they're truly founded)
@@ -189,13 +212,17 @@ final class Terrain {
             }
         }
 
-        // Recolour footprint (building) + border (natural) with the NEW slopes,
-        // so the sharp edge shades into walls automatically.
+        // Recolour the footprint (roof = body) and the 1-cell wall ring (a darker
+        // shade of body) so the walls read as the building's own sides instead of
+        // dragging terrain greens/sands/blues up them. Beyond the ring is natural
+        // terrain. The roof/wall tone split gives a clearer solid-3D read.
+        let wall = (clampU8(Float(body.0) * 0.6), clampU8(Float(body.1) * 0.6), clampU8(Float(body.2) * 0.62))
         for j in 0..<rh {
             for i in 0..<rw {
                 let x = bx0 + i, y = by0 + j
                 let inFootprint = abs(x - cx) <= half && abs(y - cy) <= half
-                colorCell(x, y, base: inFootprint ? body : nil)
+                let onRing = !inFootprint && abs(x - cx) <= half + 1 && abs(y - cy) <= half + 1
+                colorCell(x, y, base: inFootprint ? body : (onRing ? wall : nil))
             }
         }
         return Stamp(x0: bx0, y0: by0, w: rw, h: rh, heights: savedH, colors: savedC)
