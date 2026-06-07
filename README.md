@@ -6,8 +6,10 @@ to the next planet when the skies are clear — chasing a high score across an
 endless campaign. *Defender* by way of *Rescue on Fractalus*, with a
 period-correct pixelated look.
 
+![Strataris title screen](docs/screenshots/title.png)
+
 **The first *native* game in the Jorvik suite** — the others (Star Raiders,
-Rescue on Fractalus, Centipede, Mr. Do!, Gauntlet) are HTML/canvas tributes.
+Centipede, Mr. Do!) are HTML/canvas tributes.
 
 ## The whole game is about 1 MB — and there are zero asset files
 
@@ -16,7 +18,8 @@ textures, no audio files, no 3-D models, no fonts to ship:
 
 - **Terrain** — seamless fractal-noise (fbm) heightmaps, height-banded colour,
   slope shading, distance haze.
-- **Ships** — flat-shaded low-poly hulls, a handful of triangles each.
+- **Ships & installations** — flat-shaded low-poly hulls and colony buildings
+  (towers, domes, hangars, habitats), a handful of triangles each.
 - **Music & SFX** — a from-scratch synthesiser (square/saw/triangle/noise/
   rumble voices plus a Karplus-Strong plucked string, with envelopes, overdrive
   and a limiter); the title theme is an original long-form generative build.
@@ -62,6 +65,15 @@ floppy is exactly as impossible as it was in 1995.)
   alien fleet.
 - **High-score table.** Name, stardate, score, and level, persisted across
   sessions.
+
+## Screenshots
+
+| | |
+|---|---|
+| ![Combat over Vulcan](docs/screenshots/combat.png) | ![Warp approach to Tantalus](docs/screenshots/warp.png) |
+| Defending a colony as the swarm closes in. | Re-entry — warping in to the next world. |
+| ![Enemy vessel database](docs/screenshots/codex.png) | ![Game over and high scores](docs/screenshots/game-over.png) |
+| The enemy codex: a rotating 3-D threat assessment. | Run's end, and the persistent high-score table. |
 
 ## Run it
 
@@ -135,7 +147,7 @@ that canvas and upscales it nearest-neighbour to the drawable.
 | `Camera.swift` | Legacy scalar bridge (HUD/radar/AI/audio), written from `Camera6DOF` |
 | `InputState.swift` | Effective input (keyboard OR'd with gamepad) |
 | `Gamepad.swift` | Controller polling + rebindable action map |
-| `Mesh.swift` | Low-poly ship meshes (flat-shaded solids) |
+| `Mesh.swift` | Low-poly ship & building meshes (flat-shaded solids) |
 | `Enemy.swift` | Enemy field, kinds, AI, points |
 | `Structure.swift` | Ground installations + damage stages |
 | `Combat.swift` / `Projectile.swift` | Fire, bombs, hit detection, scoring |
@@ -149,12 +161,6 @@ that canvas and upscales it nearest-neighbour to the drawable.
 | `FeatureFlags.swift` | Hidden `defaults write` feature flags |
 | `OptionsSheet.swift` / `SettingsSheet.swift` | Options / controller sheets |
 | `generate_icon.swift` | Build-time app-icon generator (not compiled in) |
-
-## Roadmap
-
-See `TODO.md` for the backlog. The game is feature-complete for a release
-candidate; remaining items are polish and distribution (publishing the Sparkle
-appcast, a product page, About-panel links).
 
 ---
 
