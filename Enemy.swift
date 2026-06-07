@@ -12,6 +12,8 @@
 
 import Foundation
 
+// Deterministic LCG (Numerical Recipes constants) → [0,1). Seeded per field, so
+// a given seed always reproduces the same spawn layout (replays, the smoke test).
 @inline(__always) private func nextRand(_ s: inout UInt32) -> Float {
     s = s &* 1_664_525 &+ 1_013_904_223
     return Float((s >> 8) & 0xFFFF) / Float(0xFFFF)
@@ -159,7 +161,7 @@ final class EnemyField {
         motherTimer -= dt
         if motherTimer <= 0 && !enemies.contains(where: { $0.kind == .mothership }) {
             spawnMothership(playerX: playerX, playerY: playerY)
-            motherTimer = 50 + nextRand(&fieldRng) * 45
+            motherTimer = 50 + nextRand(&fieldRng) * 45   // next one in 50–95 s (the first is sooner, 40–70 s)
         }
 
         for i in enemies.indices {

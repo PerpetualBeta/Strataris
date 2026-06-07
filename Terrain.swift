@@ -52,6 +52,8 @@ final class Terrain {
     // MARK: Sampling (hot path)
 
     @inline(__always) func heightF(_ x: Float, _ y: Float) -> Float {
+        // `& mask` wraps the coord into the power-of-two map for free — including
+        // negatives, via two's-complement — so the world tiles seamlessly.
         let xi = Int(x.rounded(.down)) & mask
         let yi = Int(y.rounded(.down)) & mask
         return Float(heights[yi &* size &+ xi])

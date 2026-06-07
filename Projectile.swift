@@ -31,7 +31,7 @@ final class ProjectileField {
     func update(dt: Float, playerX: Float, playerY: Float, playerZ: Float, terrain: Terrain) -> Int {
         guard !shots.isEmpty else { return 0 }
         var hits = 0
-        let hitR2: Float = 30 * 30
+        let hitR2: Float = 30 * 30      // 30-unit player hit sphere (squared, to skip the sqrt)
         var kept: [Projectile] = []
         kept.reserveCapacity(shots.count)
         for var p in shots {

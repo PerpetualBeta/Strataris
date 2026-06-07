@@ -1443,11 +1443,9 @@ final class Renderer: NSObject, MTKViewDelegate {
             attackCalloutTimer = max(0, attackCalloutTimer - dt)
             let curHP = structures.structures.reduce(0) { $0 + max(0, $1.health) }
             if curHP < prevVoiceStructHealth {
-                // A base lost health → radio callout. (The damage look — charring
-                // → rubble — is the building model's tint/state in
-                // structureInstances, not a heightfield edit; markTerrainDirty is
-                // cheap insurance in case the heightfield was touched.)
-                mesh.markTerrainDirty()
+                // A base lost health → radio callout. No mesh rebuild needed: the
+                // damage look (charring → rubble) is the building model's
+                // tint/state in structureInstances; the heightfield is untouched.
                 if attackCalloutTimer <= 0 { comms.say("Command post under attack"); attackCalloutTimer = 12 }
             }
             prevVoiceStructHealth = curHP

@@ -79,6 +79,7 @@ final class SmokeField {
         }
     }
 
+    // Cheap LCG (Numerical Recipes constants) → [0,1) for debris jitter.
     private func rnd() -> Float {
         rng = rng &* 1_664_525 &+ 1_013_904_223
         return Float((rng >> 8) & 0xFFFF) / Float(0xFFFF)

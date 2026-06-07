@@ -124,6 +124,8 @@ struct Camera6DOF {
     /// Nose elevation above the horizon (radians); feeds the attitude dial.
     var pitchAngle: Float { asinf(max(-1, min(1, forward.z))) }
     /// Bank/roll about the forward axis (radians); feeds the attitude dial.
+    // Roll about the forward axis: the angle the wing line (right vector) has
+    // tilted out of the horizontal, recovered from the orientation basis.
     var bankAngle: Float { let r = right, u = up; return atan2f(-r.z, u.z) }
 
     func viewMatrix() -> simd_float4x4 {
@@ -330,7 +332,6 @@ final class MeshTerrainRenderer {
     private var activeVB = 0
     private var centerCell: SIMD2<Int>      // patch centre, world coords (quantised to stride)
     private var building = false
-    private var forceRebuild = false        // heightfield changed (e.g. a base crumbled) → rebuild the patch
     private let buildQueue = DispatchQueue(label: "cc.jorviksoftware.strataris.meshbuild")
 
 
@@ -706,10 +707,9 @@ final class MeshTerrainRenderer {
         let q = Float(stride)
         let cell = SIMD2<Int>(Int((pos.x / q).rounded()) * stride, Int((pos.y / q).rounded()) * stride)
         let drift = max(abs(cell.x - centerCell.x), abs(cell.y - centerCell.y))
-        // A forced rebuild (heightfield mutated under the patch) overrides the
-        // drift/LOD short-circuit so a crumbling base shows up promptly.
-        if !forceRebuild && stride == cellStride && drift < recenterStep * stride { return }
-        forceRebuild = false
+        // Rebuild only when the LOD stride changes or the camera has drifted past
+        // the threshold; otherwise the current patch still covers the view.
+        if stride == cellStride && drift < recenterStep * stride { return }
         building = true
         if sync {
             swapIn(MeshTerrainRenderer.buildVertices(terrain: terrain, patchN: patchN, center: cell, stride: stride),
@@ -874,18 +874,13 @@ final class MeshTerrainRenderer {
         return cmd
     }
 
-    /// Force the next `recenterIfNeeded` to rebuild the patch even if the camera
-    /// hasn't drifted — call when the heightfield itself changed under the patch
-    /// (e.g. a destroyed structure's pad was restored to pristine ground).
-    func markTerrainDirty() { forceRebuild = true }
-
     /// Swap the heightfield this renderer streams (a new planet on warp), reusing
     /// all pipelines/textures (no shader recompile). Rebuilds the active patch
     /// synchronously so the very next frame shows the new world. Use for loads /
     /// restarts (off the hot path); for warps, prefer stage/commit below.
     func setTerrain(_ t: Terrain, centerX: Int = 512, centerY: Int = 512) {
         terrain = t
-        building = false; forceRebuild = false
+        building = false
         let center = SIMD2<Int>(centerX, centerY)
         swapIn(MeshTerrainRenderer.buildVertices(terrain: t, patchN: patchN, center: center, stride: 1),
                center: center, stride: 1)
@@ -915,7 +910,7 @@ final class MeshTerrainRenderer {
     /// makes the finalize-time call a no-op rather than a redundant sync rebuild).
     func commitStagedTerrain(fallback: Terrain, centerX: Int = 512, centerY: Int = 512) {
         if let v = stagedVerts, let st = stagedTerrain {
-            terrain = st; building = false; forceRebuild = false
+            terrain = st; building = false
             swapIn(v, center: stagedCenter, stride: 1)
             stagedVerts = nil; stagedTerrain = nil
         } else if terrain !== fallback {

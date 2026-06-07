@@ -35,6 +35,7 @@ final class StructureField {
     init(terrain: Terrain, around cx: Float, cy: Float, count: Int = 5, seed: UInt32 = 0x0B00_B1E5) {
         self.terrain = terrain
         var rngState = seed
+        // Deterministic LCG (Numerical Recipes) → [0,1): same seed ⇒ same colony layout.
         func rnd() -> Float {
             rngState = rngState &* 1_664_525 &+ 1_013_904_223
             return Float((rngState >> 8) & 0xFFFF) / Float(0xFFFF)
@@ -71,6 +72,8 @@ final class StructureField {
             let stamp = terrain.stampStructure(centerX: sx, centerY: sy, half: half + 12,
                                                wallHeight: 3, body: pad)
             let padTop = terrain.heightF(sx, sy)
+            // World Z of the model's top = pad top + (model-space top × the
+            // footprint scale, which is `half`). Used as the smoke/explosion origin.
             structures.append(Structure(x: sx, y: sy, half: half,
                                         roofHeight: padTop + Mesh.buildingTopZ(kind) * Float(half),
                                         kind: kind, health: maxHealth, alive: true, originalStamp: stamp))
