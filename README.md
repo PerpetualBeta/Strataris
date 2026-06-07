@@ -162,6 +162,10 @@ that canvas and upscales it nearest-neighbour to the drawable.
 | `OptionsSheet.swift` / `SettingsSheet.swift` | Options / controller sheets |
 | `generate_icon.swift` | Build-time app-icon generator (not compiled in) |
 
+## Support
+
+If you enjoy Strataris, you can [**buy me a coffee**](https://jorviksoftware.cc/donate) ☕ — it keeps the Jorvik lights on.
+
 ---
 
 *A Jorvik Software game.*
