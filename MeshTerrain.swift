@@ -258,6 +258,8 @@ private struct EntityUniforms {
     var light: SIMD4<Float>        // world light direction
     var fog: SIMD4<Float>          // x = near, y = far
     var tint: SIMD4<Float>         // per-instance colour multiply (damage state); white = unchanged
+    var fogColor: SIMD4<Float>     // xyz = horizon haze colour (sky gradient base)
+    var skyZenith: SIMD4<Float>    // xyz = zenith colour, so fog matches the sky behind the fragment
 }
 
 /// A colony installation to draw: which model, where (world transform), and a
@@ -363,9 +365,9 @@ final class MeshTerrainRenderer {
 
     // Lit, flat-shaded craft (enemies). Per-face normals → faceted look; shading
     // rotates with the craft. Fades with distance like the terrain.
-    struct EntU { float4x4 vp; float4x4 model; float4 eye; float4 light; float4 fog; float4 tint; };
+    struct EntU { float4x4 vp; float4x4 model; float4 eye; float4 light; float4 fog; float4 tint; float4 fogColor; float4 skyZenith; };
     struct EVIn  { float3 pos [[attribute(0)]]; float3 nrm [[attribute(1)]]; float4 col [[attribute(2)]]; };
-    struct EVOut { float4 position [[position]]; float3 shaded; float fogT; float fade; };
+    struct EVOut { float4 position [[position]]; float3 shaded; float fogT; float3 fogc; };
 
     vertex EVOut v_entity(EVIn in [[stage_in]], constant EntU& u [[buffer(1)]]) {
         float4 wp = u.model * float4(in.pos, 1.0);
@@ -377,11 +379,24 @@ final class MeshTerrainRenderer {
         o.shaded = in.col.rgb * u.tint.rgb * (0.45 + 0.55 * d);
         float dist = distance(wp.xyz, u.eye.xyz);
         o.fogT = clamp((dist - u.fog.x) / max(1.0, u.fog.y - u.fog.x), 0.0, 1.0);
-        o.fade = u.tint.w;   // 1 = fade with distance (craft); 0 = stay opaque (buildings)
+        // Fog target = the sky colour in this fragment's view direction (same
+        // gradient as the sky shader), NOT a flat haze. A building top pokes up
+        // into bluer sky than the horizon, so fogging to flat haze left it a pale
+        // block against a darker sky; matching the local sky colour makes it melt
+        // seamlessly into whatever is actually behind it.
+        float3 vdir = normalize(wp.xyz - u.eye.xyz);
+        float tz = vdir.z;                                  // world up = +z
+        float3 hz = u.fogColor.rgb;
+        o.fogc = tz >= 0.0 ? mix(hz, u.skyZenith.rgb, smoothstep(0.0, 0.55, tz))
+                           : mix(hz, hz * 0.82, smoothstep(0.0, -0.5, tz));
         return o;
     }
+    // Distance fog blends the lit colour toward the sky while staying fully
+    // OPAQUE. (Terrain fades via alpha to reveal the sky behind it — fine for a
+    // full-screen ground plane, but on a discrete building that just makes it
+    // see-through. A solid object must keep alpha = 1 and fog its colour.)
     fragment float4 f_entity(EVOut in [[stage_in]]) {
-        return float4(in.shaded, 1.0 - in.fogT * in.fade);
+        return float4(mix(in.shaded, in.fogc, in.fogT), 1.0);
     }
 
     // Camera-facing billboard (effects): the quad corner is offset along the
@@ -801,7 +816,8 @@ final class MeshTerrainRenderer {
             var eu = EntityUniforms(vp: vp, model: matrix_identity_float4x4,
                                     eye: SIMD4<Float>(camera.position, 1),
                                     light: SIMD4<Float>(simd_normalize(SIMD3<Float>(-1, 0.35, 0.9)), 0),
-                                    fog: fogP, tint: white)
+                                    fog: fogP, tint: white,
+                                    fogColor: themeC(th.skyHaze), skyZenith: themeC(th.skyTop))
             enc.setRenderPipelineState(entityPipeline)
             enc.setDepthStencilState(meshDepth)
             for inst in structures {

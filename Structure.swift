@@ -62,8 +62,11 @@ final class StructureField {
 
             // Flatten a low concrete pad (no tall walls — the building itself is a
             // 3D model placed on top), so it's founded and reads as built ground.
+            // The pad is stamped wider than the placement footprint so the widest
+            // models (hab annex ±1.35·s, bunker ±1.2·s) sit fully on concrete with a
+            // margin — `half` still drives placement/flatness, so layout is unchanged.
             let kind = kinds[structures.count % kinds.count]
-            let stamp = terrain.stampStructure(centerX: sx, centerY: sy, half: half,
+            let stamp = terrain.stampStructure(centerX: sx, centerY: sy, half: half + 12,
                                                wallHeight: 3, body: pad)
             let padTop = terrain.heightF(sx, sy)
             structures.append(Structure(x: sx, y: sy, half: half,

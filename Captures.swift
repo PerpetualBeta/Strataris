@@ -137,15 +137,14 @@ enum Captures {
             }
             return field.structures.map { st in
                 let padZ = terr.heightF(st.x, st.y), s = Float(st.half)
-                let yaw = Float((Int(st.x) ^ Int(st.y)) & 7) * 0.18, cs = cosf(yaw), sn = sinf(yaw)
-                let m = simd_float4x4(columns: (
-                    SIMD4<Float>(cs * s, sn * s, 0, 0), SIMD4<Float>(-sn * s, cs * s, 0, 0),
+                let m = simd_float4x4(columns: (   // axis-aligned: sits square on the pad
+                    SIMD4<Float>(s, 0, 0, 0), SIMD4<Float>(0, s, 0, 0),
                     SIMD4<Float>(0, 0, s, 0), SIMD4<Float>(wrap(st.x, cam.x), wrap(st.y, cam.y), padZ, 1)))
-                if !st.alive { return (kind: .rubble, model: m, tint: SIMD4<Float>(1, 1, 1, 0)) }
+                if !st.alive { return (kind: .rubble, model: m, tint: SIMD4<Float>(1, 1, 1, 1)) }
                 let f = max(0, min(1, Float(st.health) / Float(field.maxHealth)))
                 let charred = SIMD3<Float>(0.85, 0.45, 0.38)
                 let t = charred + (SIMD3<Float>(1, 1, 1) - charred) * f
-                return (kind: st.kind, model: m, tint: SIMD4<Float>(t.x, t.y, t.z, 0))
+                return (kind: st.kind, model: m, tint: SIMD4<Float>(t.x, t.y, t.z, 1))   // w=1 → fog-fades
             }
         }
 

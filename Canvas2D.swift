@@ -722,7 +722,7 @@ final class Canvas2D {
     /// Perk: remaining radial-pulse charges, top-left corner.
     func drawPulseCharges(_ n: Int) {
         let (r, g, b): (CGFloat, CGFloat, CGFloat) = n > 0 ? (1.0, 0.78, 0.35) : (0.59, 0.47, 0.35)
-        drawUnicodeCol("PULSE \(max(0, n))", x: 4, y: 2, maxWidth: 150, fontSize: 11, r, g, b)
+        drawUnicodeCol("PULSE \(max(0, n))", x: 32, y: 2, maxWidth: 150, fontSize: 11, r, g, b)
     }
 
     /// Perk: cloak status, top-left below the pulse readout. Shows READY,
@@ -737,7 +737,7 @@ final class Canvas2D {
         } else {
             s = "CLOAK READY"; (r, g, b) = (0.47, 1.0, 0.78)
         }
-        drawUnicodeCol(s, x: 4, y: 15, maxWidth: 150, fontSize: 11, r, g, b)
+        drawUnicodeCol(s, x: 32, y: 15, maxWidth: 150, fontSize: 11, r, g, b)
     }
 
     /// Brief centred banner near the top for perk unlocks / bonuses. `t` is the

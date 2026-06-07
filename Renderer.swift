@@ -672,16 +672,20 @@ final class Renderer: NSObject, MTKViewDelegate {
         return field.structures.map { st in
             let padZ = terr.heightF(st.x, st.y)
             let s = Float(st.half)
-            let yaw = Float((Int(st.x) ^ Int(st.y)) & 7) * 0.18
-            let cs = cosf(yaw), sn = sinf(yaw)
+            // Axis-aligned (no yaw): the concrete pad is an axis-aligned square, so
+            // a rotated footprint would throw the building's corners off the pad
+            // into the air. The five distinct silhouettes give variety on their own.
             let m = simd_float4x4(columns: (
-                SIMD4<Float>(cs * s, sn * s, 0, 0), SIMD4<Float>(-sn * s, cs * s, 0, 0),
+                SIMD4<Float>(s, 0, 0, 0), SIMD4<Float>(0, s, 0, 0),
                 SIMD4<Float>(0, 0, s, 0), SIMD4<Float>(wrap(st.x, cam.x), wrap(st.y, cam.y), padZ, 1)))
-            if !st.alive { return (kind: .rubble, model: m, tint: SIMD4<Float>(1, 1, 1, 0)) }
+            // w = 1 → fog-fade with distance, exactly like the terrain, so a far
+            // base melts into the horizon haze instead of hovering as a solid blob
+            // over terrain that has already faded out. Near bases (fogT≈0) stay opaque.
+            if !st.alive { return (kind: .rubble, model: m, tint: SIMD4<Float>(1, 1, 1, 1)) }
             let f = max(0, min(1, Float(st.health) / Float(field.maxHealth)))
             let charred = SIMD3<Float>(0.85, 0.45, 0.38)
             let t = charred + (SIMD3<Float>(1, 1, 1) - charred) * f
-            return (kind: st.kind, model: m, tint: SIMD4<Float>(t.x, t.y, t.z, 0))   // w=0 → opaque
+            return (kind: st.kind, model: m, tint: SIMD4<Float>(t.x, t.y, t.z, 1))
         }
     }
 
@@ -1336,6 +1340,17 @@ final class Renderer: NSObject, MTKViewDelegate {
             // Fly the authoritative 6DOF camera; the legacy `camera` is synced
             // from it for the HUD/radar/AI/audio that still read scalar fields.
             updateMeshFlight(dt: dt)
+
+            // Cloak active/recharge countdown runs the whole time you're flying —
+            // including the post-clear free flight (state .won), not just active
+            // combat. A discoverable edge: loiter after a planet's cleared and the
+            // cloak tops itself back up before you warp on.
+            if cloakActive > 0 {
+                cloakActive = max(0, cloakActive - dt)
+                if cloakActive == 0 { cloakCooldown = cloakRecharge }   // recharge starts when cloak ends
+            } else if cloakCooldown > 0 {
+                cloakCooldown = max(0, cloakCooldown - dt)
+            }
         }
         // The world is rendered after the game logic (below): it projects through
         // `camera6` and draws the final craft positions for the frame.
@@ -1367,12 +1382,8 @@ final class Renderer: NSObject, MTKViewDelegate {
                 }
             }
             if !input.cloak { cloakLatch = false }
-            if cloakActive > 0 {
-                cloakActive = max(0, cloakActive - dt)
-                if cloakActive == 0 { cloakCooldown = cloakRecharge }   // recharge starts when cloak ends
-            } else if cloakCooldown > 0 {
-                cloakCooldown = max(0, cloakCooldown - dt)
-            }
+            // (Cloak active/recharge countdown ticks in the `flying` block above so
+            // it keeps recharging during post-clear free flight, not just combat.)
 
             structures.tick(dt: dt)
             enemies.update(dt: dt, playerX: camera.x, playerY: camera.y, playerZ: camera.height,
