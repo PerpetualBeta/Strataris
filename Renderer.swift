@@ -1,10 +1,11 @@
-// Strataris — Metal presentation layer.
+// Strataris — game-state machine, frame loop, and Metal presentation.
 //
-// The canvas engine renders on the CPU into a small RGBA framebuffer; this
-// layer's only job is to get that framebuffer onto the screen each frame:
-// upload it to a texture and draw a single full-screen triangle that samples
-// it with NEAREST filtering, so the low-res image upscales into crisp,
-// period-correct pixels rather than a blurry mess.
+// The GPU mesh renderer (MeshTerrainRenderer) draws the 3D world into a small
+// RGBA framebuffer; the CPU Canvas2D then composites the HUD/cockpit/cutscenes
+// on top. This layer drives that each frame and gets the finished framebuffer
+// onto the screen: upload it to a texture and draw a single full-screen
+// triangle that samples it with NEAREST filtering, so the low-res image
+// upscales into crisp, period-correct pixels rather than a blurry mess.
 //
 // The blit shader is compiled at runtime from the source string below, which
 // keeps the build a plain `swiftc` source list (no .metal compile step in
@@ -1442,9 +1443,10 @@ final class Renderer: NSObject, MTKViewDelegate {
             attackCalloutTimer = max(0, attackCalloutTimer - dt)
             let curHP = structures.structures.reduce(0) { $0 + max(0, $1.health) }
             if curHP < prevVoiceStructHealth {
-                // A base was damaged or destroyed → the heightfield was re-stamped
-                // (crumble look / ground restored). Rebuild the mesh patch so the
-                // change shows up; the canvas path samples live, so it's a no-op there.
+                // A base lost health → radio callout. (The damage look — charring
+                // → rubble — is the building model's tint/state in
+                // structureInstances, not a heightfield edit; markTerrainDirty is
+                // cheap insurance in case the heightfield was touched.)
                 mesh.markTerrainDirty()
                 if attackCalloutTimer <= 0 { comms.say("Command post under attack"); attackCalloutTimer = 12 }
             }

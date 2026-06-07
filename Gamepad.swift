@@ -10,9 +10,9 @@ import GameController
 
 /// A rebindable discrete control. Steering stays on the left stick (not bound).
 ///
-/// `pulse` and `screenshot` are optional — they only exist when their hidden
-/// feature flag is enabled (see `activeCases`). The flight controls are always
-/// present.
+/// `screenshot` is optional — it only appears when its hidden feature flag is
+/// enabled (see `activeCases`). `cloak`/`pulse` are perks: always present, but
+/// inert until the player reaches their unlock level.
 enum PadAction: String, CaseIterable {
     case fire, throttleUp, throttleDown, pause, warp, cloak, pulse, screenshot
 

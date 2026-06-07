@@ -7,8 +7,8 @@
 // (tracer only). A hit removes the craft and spawns an explosion; every shot
 // leaves a brief tracer for feedback whether it connected or not.
 //
-// Projectiles are instantaneous for now — crisp and arcade-y. When enemies
-// start moving fast we can swap in travelling bolts behind the same call.
+// The player's shot is hitscan (instantaneous) — crisp and arcade-y. Enemy
+// fire, by contrast, uses travelling, dodgeable bolts (see ProjectileField).
 
 import Foundation
 

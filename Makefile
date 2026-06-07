@@ -1,7 +1,7 @@
 # Strataris: Galactic Colony Defence — first-person mesh-terrain shoot-'em-up.
 #
-# First NATIVE game in the Jorvik suite (the others — Star Raiders, Rescue
-# on Fractalus, Centipede, Mr. Do!, Gauntlet — are HTML/canvas tributes).
+# First NATIVE game in the Jorvik suite (the others — Star Raiders,
+# Centipede, Mr. Do! — are HTML/canvas tributes).
 # Built with swiftc + runtime-compiled Metal shaders; the terrain is a GPU
 # triangle mesh rendered from a quaternion camera into a low-res framebuffer
 # and upscaled nearest-neighbour for that period-correct pixelated look.

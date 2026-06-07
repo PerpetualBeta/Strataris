@@ -18,7 +18,7 @@ final class SettingsSheet: NSObject {
     private let statusLabel = NSTextField(labelWithString: "")
     private let previewLabel = NSTextField(labelWithString: "")
 
-    // One bind button per action (aligned with PadAction.allCases by tag).
+    // One bind button per action (aligned with PadAction.activeCases by tag).
     private var bindButtons: [NSButton] = []
 
     // Capture state: the action awaiting a press, and whether all controls have
@@ -73,8 +73,9 @@ final class SettingsSheet: NSObject {
         bindHdr.font = mono(11, .bold)
         bindHdr.textColor = .secondaryLabelColor
 
-        // One row per rebindable action. Flag-gated actions (radial pulse,
-        // screenshot) appear only while their feature flag is on.
+        // One row per rebindable action (PadAction.activeCases). The screenshot
+        // action appears only while its feature flag is on; cloak/pulse are
+        // always shown (perks, gated by unlock level in-game).
         var rows: [NSView] = []
         for (i, action) in PadAction.activeCases.enumerated() {
             let label = NSTextField(labelWithString: action.title)

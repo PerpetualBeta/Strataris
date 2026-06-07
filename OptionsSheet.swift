@@ -1,9 +1,9 @@
 // Strataris — options / settings sheet (⌘,).
 //
 // The single place for player preferences: audio volumes (Music / SFX / Voice /
-// Ambient),
-// flight controls (invert pitch, stick deadzone), and a Reset High Scores
-// action. Changes apply live and persist via GameSettings. Native AppKit (no
+// Ambient), flight controls (invert pitch, stick deadzone), flight trim
+// (agility / yaw / auto-level), and a Reset High Scores action. Changes apply
+// live and persist via GameSettings. Native AppKit (no
 // SwiftUI) to keep the game's tiny, all-procedural footprint. While open the
 // game is paused (reusing Gamepad.configuring). Esc or Done closes it.
 

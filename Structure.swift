@@ -1,14 +1,16 @@
 // Strataris — ground structures.
 //
-// The installations the player defends (the Defender core). Each is stamped
-// into the terrain heightfield (see Terrain.stampStructure), so it's founded
-// in the ground — never floating — and renders, occludes, and shades exactly
-// like the landscape it's built on. This object layer holds game state
-// (position, health, alive) and owns the heightfield snapshot needed to
-// flatten the site when the structure is destroyed.
+// The installations the player defends (the Defender core). Each is a 3-D
+// entity model (`kind`) placed on a low flat concrete pad flattened into the
+// terrain heightfield (Terrain.stampStructure, wallHeight 3), so it's founded
+// in the ground — never floating. Damage is shown by render-time model tint
+// driven by `health` (clean → charred → rubble model); the heightfield is not
+// re-stamped on damage. This layer holds game state (position, health, alive)
+// plus the pad's pristine heightfield snapshot, restored only by `destroy()`
+// (cleanup / tests).
 //
 // Placement seeks flat-ish land, away from water and other structures.
-// No enemy interaction yet — these stand to be defended.
+// Destroyers bomb these (see EnemyField); the player defends them.
 
 import Foundation
 
@@ -77,9 +79,6 @@ final class StructureField {
 
     var standing: Int { structures.reduce(0) { $0 + ($1.alive ? 1 : 0) } }
 
-    /// Apply damage: drop health, re-stamp the footprint to its new state
-    /// (restoring pristine ground first so damage stages don't compound), and
-    /// retire the structure at zero. Returns true if this hit destroyed it.
     /// Tick down damage cooldowns (call once per frame while playing).
     func tick(dt: Float) {
         for i in structures.indices where structures[i].alive {
@@ -87,6 +86,10 @@ final class StructureField {
         }
     }
 
+    /// Apply damage: drop health (rate-limited by a cooldown so a swarm can't
+    /// stack hits) and retire the structure at zero. The crumble/rubble look is
+    /// the building model's tint/state at render time, not a heightfield edit.
+    /// Returns true if this hit destroyed it.
     @discardableResult
     func damage(at index: Int, amount: Int = 1) -> Bool {
         guard structures.indices.contains(index), structures[index].alive else { return false }

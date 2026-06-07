@@ -154,7 +154,8 @@ final class Terrain {
         return col
     }
 
-    // MARK: Structures (stamped into the heightfield, so they're truly founded)
+    // MARK: Structure pads (a flat concrete apron stamped into the heightfield;
+    // the building itself is a separate 3-D model placed on top)
 
     /// Saved heightfield region, for restoring on destruction.
     struct Stamp {
@@ -178,10 +179,10 @@ final class Terrain {
     }
 
     /// Raise a square footprint to a flat roof and recolour it (plus a 1-cell
-    /// border whose slopes change). The structure becomes part of the
-    /// heightfield, so the terrain renderer founds it for free — walls rise
-    /// from the surface, ridges occlude it, fog and shading all match.
-    /// Returns a snapshot for later restore/destruction.
+    /// border whose slopes change) — the building's concrete pad. The pad
+    /// becomes part of the heightfield, so it's founded in the ground (ridges
+    /// occlude it, fog and shading match); the 3-D building model is then placed
+    /// on top by the entity pass. Returns a snapshot for later restore.
     @discardableResult
     func stampStructure(centerX: Float, centerY: Float, half: Int,
                         wallHeight: Float, body: (UInt8, UInt8, UInt8)) -> Stamp {

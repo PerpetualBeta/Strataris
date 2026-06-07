@@ -71,9 +71,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Menu bar
 
-    /// A minimal native menu, in the Jorvik order (About first, then Window
-    /// actions, then Quit). Built in code — the app has no nib. Settings and
-    /// "Check for Updates…" will slot into the app menu when those land.
+    /// A minimal native menu, in the Jorvik order (About, then Settings /
+    /// Controller / Keyboard, Check for Updates…, hide/quit, then a Window
+    /// menu). Built in code — the app has no nib.
     private func installMainMenu() {
         let mainMenu = NSMenu()
 
@@ -138,9 +138,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.windowsMenu = winMenu
     }
 
-    /// Standard macOS About panel, populated with the app icon, version, and a
-    /// Jorvik credit / tagline. Native and dependency-free (no SwiftUI), in
-    /// keeping with the game's tiny, all-procedural footprint.
     @objc func checkForUpdates(_ sender: Any?) {
         // Modern activation API — `NSApp.activate(ignoringOtherApps:)` is
         // deprecated on macOS 14+ and the system routinely refuses the
@@ -164,6 +161,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         KeyboardSheet.present(over: win, gamepad: gamepad)
     }
 
+    /// Standard macOS About panel, populated with the app icon, version, and a
+    /// Jorvik credit / tagline. Native and dependency-free (no SwiftUI), in
+    /// keeping with the game's tiny, all-procedural footprint.
     @objc func showAbout() {
         let credits = NSMutableAttributedString()
         let centre = NSMutableParagraphStyle()

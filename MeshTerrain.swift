@@ -876,7 +876,7 @@ final class MeshTerrainRenderer {
 
     /// Force the next `recenterIfNeeded` to rebuild the patch even if the camera
     /// hasn't drifted — call when the heightfield itself changed under the patch
-    /// (a structure took damage / was destroyed and re-stamped the terrain).
+    /// (e.g. a destroyed structure's pad was restored to pristine ground).
     func markTerrainDirty() { forceRebuild = true }
 
     /// Swap the heightfield this renderer streams (a new planet on warp), reusing

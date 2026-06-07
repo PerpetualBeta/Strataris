@@ -3,8 +3,9 @@
 // Each planet warps to a visually distinct world: its own sky gradient and
 // terrain colour bands (water → beach → vegetation → rock → peaks). A curated
 // set of moods, cycled by planet number, so every world looks intentional
-// rather than randomly garish. Structures keep their own grey palette
-// (Structure.stageLook) so they always read as artificial here.
+// rather than randomly garish. Structures keep their own grey palette (the
+// concrete pad tone + the building model's tint) so they always read as
+// artificial here.
 
 import Foundation
 

@@ -2,8 +2,8 @@
 //
 // Off by default; opt in per machine with `defaults write`, e.g.
 //   defaults write cc.jorviksoftware.Strataris ScreenshotOnSpace  -bool true   (F key)
-// Read live each frame, so toggling takes effect on the next launch (or
-// immediately, for flags re-read every frame).
+// Read live (computed on each access), so toggling via `defaults write` takes
+// effect on the next frame that reads the flag — no relaunch needed.
 
 import Foundation
 
