@@ -80,6 +80,14 @@ floppy is exactly as impossible as it was in 1995.)
 
 ## Run it
 
+Install it with [Homebrew](https://brew.sh):
+
+```sh
+brew install --cask perpetualbeta/jorvik/strataris
+```
+
+Or build it yourself:
+
 ```sh
 gmake build                 # universal .app via the shared jorvik-release pipeline
 open .build/Strataris.app   # fly
