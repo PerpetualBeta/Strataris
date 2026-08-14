@@ -93,7 +93,7 @@ brew install --cask perpetualbeta/jorvik/strataris
 
 ### Building it yourself
 
-The build is driven by the shared [`release.mk`](https://github.com/PerpetualBeta/jorvik-release) Make include, so it needs a checkout of `jorvik-release` **sitting beside this one** — the Makefile looks for it at `../jorvik-release/`. macOS ships GNU Make 3.81 as `make`, which is too old, so `gmake` comes from Homebrew.
+The build is driven by the shared [`release.mk`](https://github.com/PerpetualBeta/jorvik-release) Make include, so it needs a checkout of `jorvik-release` **sitting beside this one** — the Makefile looks for it at `../jorvik-release/`. macOS ships GNU Make 3.81 as `make`, which is too old, so `gmake` comes from [Homebrew](https://brew.sh).
 
 ```sh
 brew install make         # GNU Make 4+, if you do not already have gmake
