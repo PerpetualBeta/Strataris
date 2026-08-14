@@ -80,18 +80,31 @@ floppy is exactly as impossible as it was in 1995.)
 
 ## Run it
 
-Install it with [Homebrew](https://brew.sh):
+Three ways in — the first two are signed and notarised, pick whichever suits:
+
+- **[Installer (`.pkg`)](https://github.com/PerpetualBeta/Strataris/releases/latest/download/Strataris.pkg)** — recommended for a first install. Double-click to run; macOS Installer places the game in `/Applications` without quarantine or App Translocation.
+- **[Download (`.zip`)](https://github.com/PerpetualBeta/Strataris/releases/latest)** — unzip and drag `Strataris.app` to your Applications folder.
+
+Or install it with [Homebrew](https://brew.sh):
 
 ```sh
 brew install --cask perpetualbeta/jorvik/strataris
 ```
 
-Or build it yourself:
+### Building it yourself
+
+The build is driven by the shared [`release.mk`](https://github.com/PerpetualBeta/jorvik-release) Make include, so it needs a checkout of `jorvik-release` **sitting beside this one** — the Makefile looks for it at `../jorvik-release/`. macOS ships GNU Make 3.81 as `make`, which is too old, so `gmake` comes from Homebrew.
 
 ```sh
-gmake build                 # universal .app via the shared jorvik-release pipeline
-open .build/Strataris.app   # fly
+brew install make         # GNU Make 4+, if you do not already have gmake
+git clone https://github.com/PerpetualBeta/jorvik-release.git
+git clone https://github.com/PerpetualBeta/Strataris.git
+cd Strataris
+gmake build               # universal .app, written to .build/
+open .build/Strataris.app # fly
 ```
+
+Both clones have to share a parent directory; that is the only layout requirement. `gmake build` is all you need to play it. `gmake release` is the signed and notarised pipeline instead, and without `SIGN_ID` / `INSTALLER_SIGN_ID` / `NOTARY_PROFILE` it falls back to ad-hoc signing and skips notarisation — fine for checking the recipe parses, not for shipping. The full variable contract is documented in [`jorvik-release`](https://github.com/PerpetualBeta/jorvik-release).
 
 ### Controls
 
