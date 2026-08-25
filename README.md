@@ -110,22 +110,22 @@ Both clones have to share a parent directory; that is the only layout requiremen
 
 | | |
 |---|---|
-| **← / →** | steer (bank) |
-| **↑ / ↓** | climb / dive |
-| **+ / −** | throttle |
-| **Space** | fire |
-| **Z** | cloaking device (once unlocked) |
-| **X** | radial pulse (once unlocked) |
-| **R** / **Return** | start · restart · warp (on the cleared-planet screen) |
-| **P** | pause |
-| **M** | mute |
-| **B** / **V** | mission briefing / enemy intel (from the title) |
-| **Esc** | back (close briefing/codex) |
-| **C** / **K** | controller / keyboard setup |
-| **⌘,** | settings (audio, flight prefs, reset scores) |
-| **⌘Q** | quit |
+| `left` / `right` | steer (bank) |
+| `up` / `down` | climb / dive |
+| `+` / `−` | throttle |
+| `space` | fire |
+| `Z` | cloaking device (once unlocked) |
+| `X` | radial pulse (once unlocked) |
+| `R` / `return` | start · restart · warp (on the cleared-planet screen) |
+| `P` | pause |
+| `M` | mute |
+| `B` / `V` | mission briefing / enemy intel (from the title) |
+| `esc` | back (close briefing/codex) |
+| `C` / `K` | controller / keyboard setup |
+| `command` `,` | settings (audio, flight prefs, reset scores) |
+| `command` `Q` | quit |
 
-Every key is **reconfigurable** from the Keyboard sheet (**K**); the bindings
+Every key is **reconfigurable** from the Keyboard sheet (`K`); the bindings
 above are just the defaults.
 
 A connected game controller (Xbox / DualShock / any Extended Gamepad) is
