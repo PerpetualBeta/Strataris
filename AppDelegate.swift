@@ -164,48 +164,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Standard macOS About panel, populated with the app icon, version, and a
     /// Jorvik credit / tagline. Native and dependency-free (no SwiftUI), in
     /// keeping with the game's tiny, all-procedural footprint.
+    /// The standard Jorvik About window: version, the public domain declaration,
+    /// and the Source Code and Product Page links. This used AppKit's standard
+    /// panel, which has none of those. The shared window also opens on the
+    /// current space (`JorvikWindowHelper`).
     @objc func showAbout() {
-        let credits = NSMutableAttributedString()
-        let centre = NSMutableParagraphStyle()
-        centre.alignment = .center
-        func line(_ s: String, size: CGFloat, color: NSColor, spacingAfter: CGFloat = 6) {
-            credits.append(NSAttributedString(string: s + "\n", attributes: [
-                .font: NSFont.systemFont(ofSize: size),
-                .foregroundColor: color,
-                .paragraphStyle: centre,
-            ]))
-            credits.append(NSAttributedString(string: "\n", attributes: [
-                .font: NSFont.systemFont(ofSize: spacingAfter),
-                .paragraphStyle: centre,
-            ]))
-        }
-        line("Galactic Colony Defence", size: 12, color: .labelColor)
-        line("A first-person mesh-terrain shoot-’em-up.\nEvery pixel and sound generated in code — no asset files.",
-             size: 10, color: .secondaryLabelColor)
-        line("A Jorvik Software game.", size: 10, color: .secondaryLabelColor, spacingAfter: 2)
-
-        orderFrontAboutPanelOnActiveSpace(options: [
-            .applicationName: "Strataris",
-            .credits: credits,
-        ])
+        JorvikAboutView.showWindow(appName: "Strataris", repoName: "Strataris", productPage: "games/strataris")
     }
 
-    /// Shows the standard About panel on the space the user is on.
-    ///
-    /// AppKit makes the panel once and shows that same panel each time, where
-    /// it was last left. One left open, or closed, on another space would
-    /// switch spaces to reach it. Marked `.moveToActiveSpace` it comes here
-    /// instead. The flag stays set, because it acts when the panel becomes
-    /// active, after `activate` has finished (measured on macOS 27.0.1,
-    /// 2026-10-11, as for JorvikKit's `showOnActiveSpace`).
-    private func orderFrontAboutPanelOnActiveSpace(options: [NSApplication.AboutPanelOptionKey: Any]) {
-        let before = Set(NSApp.windows.map(ObjectIdentifier.init))
-        NSApp.orderFrontStandardAboutPanel(options: options)
-        for window in NSApp.windows where !before.contains(ObjectIdentifier(window)) {
-            window.collectionBehavior.insert(.moveToActiveSpace)
-        }
-        NSApp.activate(ignoringOtherApps: true)
-    }
 }
 
 /// Keeps Sparkle's UI in front for the whole update session — canonical
